@@ -197,8 +197,22 @@ jobs:
     needs: build-scan-sign
     runs-on: ubuntu-latest
     steps:
+      # main now requires PRs + passing checks + signed commits (see the
+      # platform:github:branch-protection scaffolder step this repo was
+      # created with). A plain git push here would be rejected — this
+      # generates a short-lived installation token for the platform deploy
+      # bot, which the ruleset explicitly exempts, instead of a long-lived PAT.
+      - name: Mint platform-deploy-bot installation token
+        id: deploy-bot-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.PLATFORM_DEPLOY_BOT_APP_ID }}
+          private-key: ${{ secrets.PLATFORM_DEPLOY_BOT_PRIVATE_KEY }}
+
       - uses: actions/checkout@v4
-        with: { ref: main }
+        with:
+          ref: main
+          token: ${{ steps.deploy-bot-token.outputs.token }}
 
       - name: Bump image tag + digest in chart/values.yaml
         run: |
@@ -206,10 +220,10 @@ jobs:
           DIGEST="${{ needs.build-scan-sign.outputs.image_digest }}"
           yq -i ".image.tag = \"${TAG}\" | .image.digest = \"${DIGEST}\"" chart/values.yaml
 
-      - name: Commit
+      - name: Commit as platform-deploy-bot
         run: |
-          git config user.name "platform-bot"
-          git config user.email "platform-bot@acme.io"
+          git config user.name "platform-deploy-bot[bot]"
+          git config user.email "platform-deploy-bot[bot]@users.noreply.github.com"
           git add chart/values.yaml
           git commit -m "ci: deploy ${{ needs.build-scan-sign.outputs.image_tag }}" || exit 0
           git push
