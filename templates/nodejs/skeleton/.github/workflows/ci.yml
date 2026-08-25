@@ -1,0 +1,215 @@
+name: ci
+
+on:
+  pull_request:
+    # gated branches — the coverage job below is a required status check
+    # on all three (see terraform-modules/envs/github-repos), so a PR
+    # targeting any of them can't merge under 70% line coverage
+    branches: [main, develop, "release/**"]
+  push:
+    branches: [main]
+
+permissions:
+  contents: write # the update-manifests job commits the new image tag back
+  id-token: write # OIDC federation to AWS + Sigstore keyless signing, no static secrets
+  security-events: write # upload SAST/scan results as code-scanning alerts
+  pull-requests: write
+
+env:
+  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }} # e.g. 123456789012.dkr.ecr.us-east-1.amazonaws.com/hello-world
+  AWS_REGION: ${{ vars.AWS_REGION }}
+
+jobs:
+  # ---------------------------------------------------------------------
+  # 1. Tests
+  # ---------------------------------------------------------------------
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "20", cache: "npm" }
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test
+
+  # ---------------------------------------------------------------------
+  # 1b. Coverage — reusable across every language template, see
+  #     platform-demo-hello-world-template's own code-coverage.yml
+  # ---------------------------------------------------------------------
+  coverage:
+    uses: bernadin-kabore/platform-demo-hello-world-template/.github/workflows/code-coverage.yml@main
+    with:
+      language: nodejs
+      coverage-threshold: 70
+
+  # ---------------------------------------------------------------------
+  # 2. SAST — static analysis of our own source for injection, unsafe
+  #    patterns, secrets left in code, etc.
+  # ---------------------------------------------------------------------
+  sast:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: javascript
+
+      - name: CodeQL analysis
+        uses: github/codeql-action/analyze@v3
+
+      - name: Semgrep
+        uses: semgrep/semgrep-action@v1
+        with:
+          config: p/owasp-top-ten
+        env:
+          SEMGREP_RULES: p/owasp-top-ten
+
+      - name: Gitleaks (secrets scan)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ---------------------------------------------------------------------
+  # 3. SCA — vulnerable/malicious third-party dependencies
+  # ---------------------------------------------------------------------
+  sca:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "20", cache: "npm" }
+      - run: npm ci
+
+      - name: npm audit (fail on high/critical)
+        run: npm audit --audit-level=high
+
+      - name: Trivy filesystem scan (dependencies)
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          format: sarif
+          output: trivy-fs-results.sarif
+
+      - name: Upload Trivy fs results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-fs-results.sarif
+
+  # ---------------------------------------------------------------------
+  # 4. Build, scan, sign, SBOM — only past this point does anything get
+  #    pushed anywhere, and only for pushes to main (PRs stop at the gates
+  #    above).
+  # ---------------------------------------------------------------------
+  build-scan-sign:
+    needs: [test, sast, sca, coverage]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      image_digest: ${{ steps.push.outputs.digest }}
+      image_tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: meta
+        run: echo "tag=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_CI_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: aws-actions/amazon-ecr-login@v2
+        id: ecr-login
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build image (not pushed yet)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: ${{ env.ECR_REPOSITORY }}:${{ steps.meta.outputs.tag }}
+
+      - name: Trivy image scan
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          image-ref: ${{ env.ECR_REPOSITORY }}:${{ steps.meta.outputs.tag }}
+          severity: HIGH,CRITICAL
+          exit-code: "1" # fails the build — nothing with a known HIGH/CRITICAL CVE ships
+          format: sarif
+          output: trivy-image-results.sarif
+
+      - name: Upload Trivy image results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-image-results.sarif
+
+      - name: Push image
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ env.ECR_REPOSITORY }}:${{ steps.meta.outputs.tag }}
+
+      - name: Generate SBOM (SPDX + CycloneDX)
+        uses: anchore/sbom-action@v0.17.2
+        with:
+          image: "${{ env.ECR_REPOSITORY }}@${{ steps.push.outputs.digest }}"
+          format: spdx-json
+          output-file: sbom.spdx.json
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign image (keyless, via GitHub OIDC + Fulcio/Rekor)
+        run: |
+          cosign sign --yes "${{ env.ECR_REPOSITORY }}@${{ steps.push.outputs.digest }}"
+
+      - name: Attest SBOM to the image
+        run: |
+          cosign attest --yes \
+            --predicate sbom.spdx.json \
+            --type spdxjson \
+            "${{ env.ECR_REPOSITORY }}@${{ steps.push.outputs.digest }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom.spdx.json
+
+  # ---------------------------------------------------------------------
+  # 5. Update the Helm chart with the new image, so ArgoCD picks it up.
+  #    This repo's chart/ is exactly what ArgoCD deploys from — see
+  #    platform-demo-gitops/services/<name>/config.json — so "update manifests"
+  #    is just "commit to this repo."
+  # ---------------------------------------------------------------------
+  update-manifests:
+    needs: build-scan-sign
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: main }
+
+      - name: Bump image tag + digest in chart/values.yaml
+        run: |
+          TAG="${{ needs.build-scan-sign.outputs.image_tag }}"
+          DIGEST="${{ needs.build-scan-sign.outputs.image_digest }}"
+          yq -i ".image.tag = \"${TAG}\" | .image.digest = \"${DIGEST}\"" chart/values.yaml
+
+      - name: Commit
+        run: |
+          git config user.name "platform-bot"
+          git config user.email "platform-bot@acme.io"
+          git add chart/values.yaml
+          git commit -m "ci: deploy ${{ needs.build-scan-sign.outputs.image_tag }}" || exit 0
+          git push

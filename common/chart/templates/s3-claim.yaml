@@ -1,0 +1,19 @@
+{{- if .Values.provisionS3Bucket }}
+# Self-service AWS infrastructure: this Claim is all a developer needs to
+# get a real, encrypted, versioned S3 bucket — Crossplane's XS3Bucket
+# Composition (platform-demo-gitops apps/crossplane/compositions) does the rest.
+# No Terraform PR, no AWS console access, no waiting on the platform team.
+apiVersion: platform.acme.io/v1alpha1
+kind: S3Bucket
+metadata:
+  name: {{ include "app.name" . }}
+  labels:
+    {{- include "app.labels" . | nindent 4 }}
+spec:
+  parameters:
+    region: us-east-1
+    versioning: true
+  compositionSelector:
+    matchLabels:
+      provider: aws
+{{- end }}

@@ -1,0 +1,22 @@
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: ${{ values.name }}
+  description: ${{ values.description }}
+  tags:
+    - ${{ values.language }}
+  annotations:
+    github.com/project-slug: ${{ values.destination.owner }}/${{ values.destination.repo }}
+    backstage.io/kubernetes-id: ${{ values.name }}
+    backstage.io/techdocs-ref: dir:.
+    argocd/app-name: ${{ values.name }}
+  links:
+    - url: https://kiali.platform-demo.acme.io/console/namespaces/${{ values.name }}/services/${{ values.name }}
+      title: Service mesh (Kiali)
+      icon: web
+spec:
+  type: service
+  lifecycle: production
+  owner: ${{ values.owner }}
+  system: platform-engineering-demo
+  providesApis: []

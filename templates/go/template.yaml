@@ -1,0 +1,145 @@
+apiVersion: scaffolder.backstage.io/v1beta3
+kind: Template
+metadata:
+  name: hello-world-go
+  title: Go Service
+  description: >-
+    Scaffold a Go "hello world" HTTP service with observability
+    (Prometheus metrics, OTel traces via otelhttp), Istio, progressive
+    delivery via Argo Rollouts, and a full security-gated CI/CD pipeline
+    already wired in.
+  tags: [go, golang]
+spec:
+  owner: platform-team
+  type: service
+
+  parameters:
+    - title: Service details
+      required: [name, owner, description]
+      properties:
+        name:
+          title: Service name
+          type: string
+          description: Used as the repo name, k8s namespace, and Backstage component name
+          pattern: "^[a-z][a-z0-9-]{2,30}$"
+          ui:autofocus: true
+        description:
+          title: Description
+          type: string
+        owner:
+          title: Owning team
+          type: string
+          ui:field: OwnerPicker
+          ui:options:
+            catalogFilter:
+              kind: Group
+
+    - title: Infrastructure options
+      properties:
+        provisionS3Bucket:
+          title: Provision an S3 bucket for this service?
+          type: boolean
+          default: false
+          description: Creates a Crossplane S3Bucket claim alongside the service
+        replicaCount:
+          title: Initial replica count
+          type: integer
+          default: 2
+          minimum: 1
+          maximum: 10
+
+    - title: Repository location
+      required: [repoUrl]
+      properties:
+        repoUrl:
+          title: Repository location
+          type: string
+          ui:field: RepoUrlPicker
+          ui:options:
+            allowedHosts: [github.com]
+
+  steps:
+    - id: fetch-common
+      name: Fetch shared platform files (Helm chart, docs, catalog-info)
+      action: fetch:template
+      input:
+        url: ../../common
+        values:
+          name: ${{ parameters.name }}
+          description: ${{ parameters.description }}
+          owner: ${{ parameters.owner }}
+          replicaCount: ${{ parameters.replicaCount }}
+          provisionS3Bucket: ${{ parameters.provisionS3Bucket }}
+          language: go
+          localDevCommands: |-
+            go mod tidy
+            go test ./...
+            go run .
+          destination: ${{ parameters.repoUrl | parseRepoUrl }}
+
+    - id: fetch-skeleton
+      name: Fetch Go application skeleton
+      action: fetch:template
+      input:
+        url: ./skeleton
+        values:
+          name: ${{ parameters.name }}
+          description: ${{ parameters.description }}
+          owner: ${{ parameters.owner }}
+          replicaCount: ${{ parameters.replicaCount }}
+          provisionS3Bucket: ${{ parameters.provisionS3Bucket }}
+          destination: ${{ parameters.repoUrl | parseRepoUrl }}
+
+    - id: publish
+      name: Publish to GitHub
+      action: publish:github
+      input:
+        allowedHosts: [github.com]
+        description: ${{ parameters.description }}
+        repoUrl: ${{ parameters.repoUrl }}
+        defaultBranch: main
+        protectDefaultBranch: true
+        requiredApprovingReviewCount: 1
+
+    - id: register
+      name: Register in the software catalog
+      action: catalog:register
+      input:
+        repoContentsUrl: ${{ steps.publish.output.repoContentsUrl }}
+        catalogInfoPath: /catalog-info.yaml
+
+    - id: fetch-gitops-pr-content
+      name: Render GitOps Application manifest
+      action: fetch:template
+      input:
+        url: ../../gitops-pr
+        targetPath: ./gitops-pr-rendered
+        values:
+          name: ${{ parameters.name }}
+          owner: ${{ parameters.owner }}
+          provisionS3Bucket: ${{ parameters.provisionS3Bucket }}
+          appRepoUrl: ${{ steps.publish.output.remoteUrl }}
+
+    - id: open-gitops-pr
+      name: Open PR against platform-demo-gitops
+      action: publish:github:pull-request
+      input:
+        repoUrl: github.com?owner=bernadin-kabore&repo=platform-demo-gitops
+        branchName: add-service-${{ parameters.name }}
+        title: "Add ${{ parameters.name }} to the platform"
+        description: |
+          Opened automatically by the hello-world-go Backstage template.
+          Adds `services/${{ parameters.name }}/config.json` so ArgoCD deploys
+          the service the scaffolder just pushed to
+          ${{ steps.publish.output.remoteUrl }}.
+        sourcePath: ./gitops-pr-rendered
+
+  output:
+    links:
+      - title: Repository
+        url: ${{ steps.publish.output.remoteUrl }}
+      - title: Open in catalog
+        icon: catalog
+        entityRef: ${{ steps.register.output.entityRef }}
+      - title: GitOps pull request
+        url: ${{ steps.open-gitops-pr.output.remoteUrl }}

@@ -1,0 +1,14 @@
+# Registered as a single `url` catalog location in platform-demo-backstage's
+# app-config.yaml, so adding a 5th language later is "add a directory under
+# templates/ + one line here" — no change needed on the Backstage side.
+apiVersion: backstage.io/v1alpha1
+kind: Location
+metadata:
+  name: hello-world-templates
+  description: Every language variant of the "hello world" scaffolder template
+spec:
+  targets:
+    - ./templates/nodejs/template.yaml
+    - ./templates/python/template.yaml
+    - ./templates/go/template.yaml
+    - ./templates/java/template.yaml
