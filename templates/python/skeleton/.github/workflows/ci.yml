@@ -1,0 +1,201 @@
+name: ci
+
+on:
+  pull_request:
+    branches: [main, develop, "release/**"]
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  id-token: write
+  security-events: write
+  pull-requests: write
+
+env:
+  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+  AWS_REGION: ${{ vars.AWS_REGION }}
+
+jobs:
+  # ---------------------------------------------------------------------
+  # 1. Tests
+  # ---------------------------------------------------------------------
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -r requirements-dev.txt
+      - run: ruff check app
+      - run: pytest
+
+  coverage:
+    uses: bernadin-kabore/platform-demo-hello-world-template/.github/workflows/code-coverage.yml@main
+    with:
+      language: python
+      coverage-threshold: 70
+
+  # ---------------------------------------------------------------------
+  # 2. SAST
+  # ---------------------------------------------------------------------
+  sast:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: python
+      - uses: github/codeql-action/analyze@v3
+
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install bandit
+      - name: Bandit
+        run: bandit -r app -f sarif -o bandit-results.sarif || true
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: bandit-results.sarif
+
+      - name: Semgrep
+        uses: semgrep/semgrep-action@v1
+        with:
+          config: p/owasp-top-ten
+
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ---------------------------------------------------------------------
+  # 3. SCA
+  # ---------------------------------------------------------------------
+  sca:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install pip-audit
+
+      - name: pip-audit (fail on any known vuln)
+        run: pip-audit -r requirements.txt
+
+      - name: Trivy filesystem scan
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          format: sarif
+          output: trivy-fs-results.sarif
+
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-fs-results.sarif
+
+  # ---------------------------------------------------------------------
+  # 4. Build, scan, sign, SBOM
+  # ---------------------------------------------------------------------
+  build-scan-sign:
+    needs: [test, sast, sca, coverage]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      image_digest: ${{ steps.push.outputs.digest }}
+      image_tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: meta
+        run: echo "tag=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_CI_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: aws-actions/amazon-ecr-login@v2
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build image (not pushed yet)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: ${{ env.ECR_REPOSITORY }}:${{ steps.meta.outputs.tag }}
+
+      - name: Trivy image scan
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          image-ref: ${{ env.ECR_REPOSITORY }}:${{ steps.meta.outputs.tag }}
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          format: sarif
+          output: trivy-image-results.sarif
+
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-image-results.sarif
+
+      - name: Push image
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ env.ECR_REPOSITORY }}:${{ steps.meta.outputs.tag }}
+
+      - name: Generate SBOM
+        uses: anchore/sbom-action@v0.17.2
+        with:
+          image: "${{ env.ECR_REPOSITORY }}@${{ steps.push.outputs.digest }}"
+          format: spdx-json
+          output-file: sbom.spdx.json
+
+      - uses: sigstore/cosign-installer@v3
+
+      - name: Sign image (keyless)
+        run: cosign sign --yes "${{ env.ECR_REPOSITORY }}@${{ steps.push.outputs.digest }}"
+
+      - name: Attest SBOM
+        run: |
+          cosign attest --yes \
+            --predicate sbom.spdx.json \
+            --type spdxjson \
+            "${{ env.ECR_REPOSITORY }}@${{ steps.push.outputs.digest }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom.spdx.json
+
+  # ---------------------------------------------------------------------
+  # 5. Update the Helm chart with the new image
+  # ---------------------------------------------------------------------
+  update-manifests:
+    needs: build-scan-sign
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: main }
+
+      - name: Bump image tag + digest in chart/values.yaml
+        run: |
+          TAG="${{ needs.build-scan-sign.outputs.image_tag }}"
+          DIGEST="${{ needs.build-scan-sign.outputs.image_digest }}"
+          yq -i ".image.tag = \"${TAG}\" | .image.digest = \"${DIGEST}\"" chart/values.yaml
+
+      - name: Commit
+        run: |
+          git config user.name "platform-bot"
+          git config user.email "platform-bot@acme.io"
+          git add chart/values.yaml
+          git commit -m "ci: deploy ${{ needs.build-scan-sign.outputs.image_tag }}" || exit 0
+          git push

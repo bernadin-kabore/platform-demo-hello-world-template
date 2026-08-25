@@ -1,0 +1,46 @@
+nameOverride: "${{ values.name }}"
+
+image:
+  repository: REPLACE_ACCOUNT_ID.dkr.ecr.REPLACE_REGION.amazonaws.com/${{ values.name }}
+  tag: "0.1.0" # bumped automatically by .github/workflows/ci.yml on every merge to main
+  digest: "" # set alongside tag by CI — Kyverno's verifyImages re-resolves by digest regardless
+
+replicaCount: ${{ values.replicaCount }}
+
+owner: ${{ values.owner }}
+
+provisionS3Bucket: ${{ values.provisionS3Bucket }}
+
+resources:
+  requests: { cpu: 50m, memory: 64Mi }
+  limits: { memory: 128Mi }
+
+service:
+  port: 8080
+
+istio:
+  gatewayHost: "${{ values.name }}.platform-demo.acme.io"
+
+rollout:
+  canary:
+    steps:
+      - setWeight: 20
+      - pause: { duration: 60 }
+      - analysis:
+          templates:
+            - templateName: istio-success-rate
+              clusterScope: true
+          args:
+            - name: service-name
+              value: "${{ values.name }}"
+            - name: namespace
+              value: "${{ values.name }}"
+      - setWeight: 50
+      - pause: { duration: 60 }
+      - setWeight: 100
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 6
+  targetCPUUtilizationPercentage: 70

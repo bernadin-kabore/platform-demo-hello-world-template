@@ -1,0 +1,7 @@
+{
+  "name": "${{values.name}}",
+  "namespace": "${{values.name}}",
+  "repoURL": "${{values.appRepoUrl}}",
+  "path": "chart",
+  "owner": "${{values.owner}}"
+}

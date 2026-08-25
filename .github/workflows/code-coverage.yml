@@ -1,0 +1,113 @@
+name: code-coverage
+
+# Reusable workflow — every language's ci.yml calls this with its own
+# `language` input instead of reimplementing coverage extraction four
+# times. Runs as its own required status check ("code-coverage / check")
+# so branch protection (see terraform-modules/envs/github-repos) can block
+# merging into main, develop, and release/* on it independently of the
+# test/sast/sca jobs.
+
+on:
+  workflow_call:
+    inputs:
+      language:
+        description: One of nodejs, python, go, java
+        type: string
+        required: true
+      coverage-threshold:
+        description: Minimum line coverage percentage required (0-100)
+        type: number
+        default: 70
+      working-directory:
+        description: Directory containing the service's source, relative to the repo root
+        type: string
+        default: "."
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # --- Node.js -------------------------------------------------------
+      - if: inputs.language == 'nodejs'
+        uses: actions/setup-node@v4
+        with: { node-version: "20", cache: "npm" }
+      - if: inputs.language == 'nodejs'
+        run: npm ci
+      - if: inputs.language == 'nodejs'
+        run: npx c8 --reporter=json-summary --reporter=text node --test src/*.test.js
+      - if: inputs.language == 'nodejs'
+        id: coverage-nodejs
+        run: |
+          pct=$(node -p "require('./coverage/coverage-summary.json').total.lines.pct")
+          echo "pct=${pct}" >> "$GITHUB_OUTPUT"
+
+      # --- Python ----------------------------------------------------------
+      - if: inputs.language == 'python'
+        uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - if: inputs.language == 'python'
+        run: pip install -r requirements-dev.txt
+      - if: inputs.language == 'python'
+        run: pytest --cov=app --cov-report=json --cov-report=term
+      - if: inputs.language == 'python'
+        id: coverage-python
+        run: |
+          pct=$(python -c "import json; print(json.load(open('coverage.json'))['totals']['percent_covered'])")
+          echo "pct=${pct}" >> "$GITHUB_OUTPUT"
+
+      # --- Go ----------------------------------------------------------
+      - if: inputs.language == 'go'
+        uses: actions/setup-go@v5
+        with: { go-version: "1.22" }
+      - if: inputs.language == 'go'
+        run: go test ./... -coverprofile=coverage.out
+      - if: inputs.language == 'go'
+        id: coverage-go
+        run: |
+          pct=$(go tool cover -func=coverage.out | grep ^total: | awk '{print substr($3, 1, length($3)-1)}')
+          echo "pct=${pct}" >> "$GITHUB_OUTPUT"
+
+      # --- Java ----------------------------------------------------------
+      - if: inputs.language == 'java'
+        uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: "21", cache: maven }
+      - if: inputs.language == 'java'
+        run: mvn -B test jacoco:report
+      - if: inputs.language == 'java'
+        id: coverage-java
+        run: |
+          pct=$(python3 - <<'EOF'
+          import xml.etree.ElementTree as ET
+          root = ET.parse("target/site/jacoco/jacoco.xml").getroot()
+          counter = next(c for c in root.findall("counter") if c.get("type") == "LINE")
+          covered, missed = int(counter.get("covered")), int(counter.get("missed"))
+          print(round(100 * covered / (covered + missed), 2))
+          EOF
+          )
+          echo "pct=${pct}" >> "$GITHUB_OUTPUT"
+
+      # --- Threshold gate, common to every language -----------------------
+      - name: Enforce coverage threshold
+        run: |
+          pct="${{ steps.coverage-nodejs.outputs.pct || steps.coverage-python.outputs.pct || steps.coverage-go.outputs.pct || steps.coverage-java.outputs.pct }}"
+          threshold="${{ inputs.coverage-threshold }}"
+
+          if [ -z "$pct" ]; then
+            echo "::error::No coverage percentage was produced for language '${{ inputs.language }}' — check the language-specific step above for failures."
+            exit 1
+          fi
+
+          echo "### Coverage: ${pct}% (threshold: ${threshold}%)" >> "$GITHUB_STEP_SUMMARY"
+
+          below=$(awk -v p="$pct" -v t="$threshold" 'BEGIN { print (p < t) ? "1" : "0" }')
+          if [ "$below" = "1" ]; then
+            echo "::error::Line coverage ${pct}% is below the required ${threshold}% threshold."
+            exit 1
+          fi
+
+          echo "Coverage ${pct}% meets the ${threshold}% threshold."

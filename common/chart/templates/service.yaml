@@ -1,0 +1,33 @@
+# Two Services, as Argo Rollouts' Istio traffic-routing integration
+# requires: "stable" (this one) always points at the last-known-good
+# ReplicaSet, "canary" points at the one currently being rolled out. The
+# Rollout controller flips their selectors during a rollout; the
+# DestinationRule below turns them into "stable"/"canary" subsets Istio can
+# split traffic between.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "app.name" . }}
+  labels:
+    {{- include "app.labels" . | nindent 4 }}
+spec:
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: http
+      name: http
+  selector:
+    app.kubernetes.io/name: {{ include "app.name" . }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "app.name" . }}-canary
+  labels:
+    {{- include "app.labels" . | nindent 4 }}
+spec:
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: http
+      name: http
+  selector:
+    app.kubernetes.io/name: {{ include "app.name" . }}

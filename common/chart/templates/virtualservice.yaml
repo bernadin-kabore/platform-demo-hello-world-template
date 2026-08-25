@@ -1,0 +1,22 @@
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: {{ include "app.name" . }}
+  labels:
+    {{- include "app.labels" . | nindent 4 }}
+spec:
+  hosts:
+    - {{ .Values.istio.gatewayHost | quote }}
+  gateways:
+    - istio-system/platform-gateway
+  http:
+    - name: primary
+      route:
+        - destination:
+            host: {{ include "app.name" . }}
+            subset: stable
+          weight: 100
+        - destination:
+            host: {{ include "app.name" . }}
+            subset: canary
+          weight: 0

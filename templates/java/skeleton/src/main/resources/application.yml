@@ -1,0 +1,15 @@
+spring:
+  application:
+    name: ${{ values.name }}
+
+app:
+  version: ${APP_VERSION:dev}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: prometheus
+      base-path: /
+      path-mapping:
+        prometheus: metrics

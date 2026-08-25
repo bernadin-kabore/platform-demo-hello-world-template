@@ -1,0 +1,15 @@
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: {{ include "app.name" . }}
+  labels:
+    {{- include "app.labels" . | nindent 4 }}
+spec:
+  host: {{ include "app.name" . }}
+  subsets:
+    - name: stable
+      labels:
+        app.kubernetes.io/name: {{ include "app.name" . }}
+    - name: canary
+      labels:
+        app.kubernetes.io/name: {{ include "app.name" . }}
