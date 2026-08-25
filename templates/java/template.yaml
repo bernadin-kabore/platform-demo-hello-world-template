@@ -97,8 +97,14 @@ spec:
         description: ${{ parameters.description }}
         repoUrl: ${{ parameters.repoUrl }}
         defaultBranch: main
-        protectDefaultBranch: true
-        requiredApprovingReviewCount: 1
+        protectDefaultBranch: false
+
+    - id: branch-protection
+      name: Protect main, develop, and release/* branches
+      action: platform:github:branch-protection
+      input:
+        owner: ${{ (parameters.repoUrl | parseRepoUrl).owner }}
+        repo: ${{ (parameters.repoUrl | parseRepoUrl).repo }}
 
     - id: register
       name: Register in the software catalog

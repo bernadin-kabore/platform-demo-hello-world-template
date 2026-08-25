@@ -34,11 +34,24 @@ Every skeleton's `ci.yml` has a `coverage` job that calls
 language (`c8` for Node.js, `pytest-cov` for Python, `go test -cover` for
 Go, JaCoCo for Java) and fails the run if line coverage is under 70%. That
 alone doesn't block a merge — it's just a status check. What actually
-blocks it is `platform-demo-terraform-modules/envs/github-repos`, which
-makes `coverage / check` (along with `test`, `sast`, `sca`) a **required**
-status check on `main`, `develop`, and `release/*` across every repo it's
-told about. Add a scaffolded service's repo name to that module's
-`repositories` list once it exists, and the same 70% gate applies to it too.
+blocks it is the `branch-protection` step every `template.yaml` runs right
+after `publish:github` creates the new repo: it calls the custom
+`platform:github:branch-protection` scaffolder action
+(`platform-demo-backstage/packages/backend/src/modules/branch-protection`),
+which creates a GitHub ruleset on that repo making `coverage / check`
+(along with `test`, `sast`, `sca`) a **required** status check on `main`,
+`develop`, and `release/*`, requiring a PR (no direct pushes), and
+requiring signed commits — automatically, for every service, the moment
+it's scaffolded. No manual step, no repo list to maintain. (The 4 platform
+repos — this one included — are protected the same way but via Terraform
+instead, since they're static and don't come and go; see
+`platform-demo-terraform-modules/envs/github-repos`, which also documents
+why scaffold-time automation is the personal-account answer to a problem a
+GitHub Organization solves for free with one org-wide ruleset.)
+
+Contributing to any protected repo requires commit signing configured
+locally (`git config commit.gpgsign true` with a GPG key, or
+`gpg.format ssh` with an SSH key — either satisfies `required_signatures`).
 
 Each `template.yaml`'s scaffolder steps fetch **both** `../../common` and
 its own `./skeleton` into the same new repo, so the Helm chart, docs, and
