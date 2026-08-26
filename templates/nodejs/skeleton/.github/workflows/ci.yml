@@ -8,6 +8,7 @@ on:
     branches: [main, develop, "release/**"]
   push:
     branches: [main]
+    paths-ignore: ["chart/values.yaml"]
 
 permissions:
   contents: write # the update-manifests job commits the new image tag back
