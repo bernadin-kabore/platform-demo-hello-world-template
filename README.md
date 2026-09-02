@@ -15,8 +15,9 @@ catalog-info.yaml     Location entity listing all four template.yaml files —
                        Called by every scaffolded service's own ci.yml as its
                        "coverage" job — see "Coverage gate" below.
 common/                Shared across every language: the Helm chart (Argo
-                       Rollout + Istio + ServiceMonitor + optional Crossplane
-                       S3Bucket claim), catalog-info.yaml, and docs/mkdocs.yml
+                       Rollout + Istio + OTel env injection + optional
+                       Crossplane S3Bucket claim), catalog-info.yaml, and
+                       docs/mkdocs.yml
 gitops-pr/             Shared: renders the one file (services/<name>/config.json)
                        PR'd into platform-demo-gitops
 templates/
@@ -57,9 +58,40 @@ Each `template.yaml`'s scaffolder steps fetch **both** `../../common` and
 its own `./skeleton` into the same new repo, so the Helm chart, docs, and
 `catalog-info.yaml` are never duplicated four times — only source code,
 `Dockerfile`, and the language-specific parts of `.github/workflows/ci.yml`
-differ between languages. Every skeleton exposes the same three endpoints
-(`/healthz`, `/readyz`, `/metrics`) and the same OTLP export target, which
-is what lets one shared Helm chart deploy any of them unmodified.
+differ between languages. Every skeleton exposes the same two endpoints (`/healthz`, `/readyz`) and
+speaks the same OTLP contract, which is what lets one shared Helm chart
+deploy any of them unmodified.
+
+## The observability contract
+
+Generated services depend on **OpenTelemetry and nothing else**. No template
+imports a Prometheus client library, names a log store, or knows that Tempo
+exists, so the platform can change backends without touching any service.
+
+| Signal | How it leaves the service |
+|---|---|
+| Traces | OTLP, from framework-level auto-instrumentation |
+| Metrics | OTLP, using OpenTelemetry semantic conventions - no `/metrics` endpoint and no hand-rolled counters |
+| Logs | Structured JSON on **stdout**, carrying `trace_id` and `span_id` |
+
+**Logs are collected, not pushed.** The platform's collector agent tails
+container stdout rather than the SDK exporting log records over the network,
+because records buffered inside a process are lost when it crashes - and
+crash logs are the ones you most need. Each language injects trace context
+its own way: a `slog.Handler` in Go, a pino `mixin()` in Node,
+`OTEL_PYTHON_LOG_CORRELATION` in Python, and the OTel agent's MDC in Java.
+
+**Nothing environment-specific is baked into images.**
+`OTEL_EXPORTER_OTLP_ENDPOINT` and `OTEL_RESOURCE_ATTRIBUTES` (carrying
+`deployment.environment.name`, `service.namespace` and `service.version`)
+are injected by the shared Helm chart at deploy time, so one immutable
+artifact promotes across environments unchanged. Kubernetes-derived
+attributes - pod, namespace, node, deployment - are deliberately *not* set
+here; the collector's `k8sattributes` processor adds them.
+
+See
+[`platform-demo-gitops/docs/observability/README.md`](../platform-demo-gitops/docs/observability/README.md)
+for why each of these choices was made and what was rejected.
 
 ## Registering these templates in Backstage
 
