@@ -5,7 +5,7 @@ metadata:
   title: Python Service
   description: >-
     Scaffold a Python (FastAPI) "hello world" HTTP service with
-    observability (Prometheus metrics, zero-code OTel traces/logs), Istio,
+    observability (zero-code OTLP metrics, traces and trace-correlated JSON logs), Istio,
     progressive delivery via Argo Rollouts, and a full security-gated CI/CD
     pipeline already wired in.
   tags: [python, fastapi]

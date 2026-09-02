@@ -8,6 +8,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o /app ./...
 
 FROM gcr.io/distroless/static-debian12:nonroot AS runtime
 COPY --from=builder /app /app
-ENV OTEL_EXPORTER_OTLP_ENDPOINT="otel-collector-gateway.observability.svc.cluster.local:4317"
+# OTEL_* configuration is injected by the Helm chart at deploy time, not
+# baked in here, so the same image promotes across environments unchanged.
 EXPOSE 8080
 ENTRYPOINT ["/app"]

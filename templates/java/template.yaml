@@ -5,7 +5,7 @@ metadata:
   title: Java Service
   description: >-
     Scaffold a Java (Spring Boot) "hello world" HTTP service with
-    observability (Micrometer/Prometheus metrics, zero-code OTel tracing via
+    observability (zero-code OTLP metrics, traces and trace-correlated JSON logs via
     the OTel Java agent), Istio, progressive delivery via Argo Rollouts, and
     a full security-gated CI/CD pipeline already wired in.
   tags: [java, spring-boot]
