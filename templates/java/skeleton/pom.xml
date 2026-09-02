@@ -30,9 +30,15 @@
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-actuator</artifactId>
     </dependency>
+    <!-- Structured JSON logs on stdout. The OpenTelemetry Java agent puts
+         trace_id/span_id into the MDC and logback-spring.xml writes them into
+         each record, which is what lets Grafana pivot from a log line to its
+         trace. Micrometer's Prometheus registry was removed: metrics now
+         leave over OTLP, so this service depends on OpenTelemetry alone. -->
     <dependency>
-      <groupId>io.micrometer</groupId>
-      <artifactId>micrometer-registry-prometheus</artifactId>
+      <groupId>net.logstash.logback</groupId>
+      <artifactId>logstash-logback-encoder</artifactId>
+      <version>7.4</version>
     </dependency>
     <dependency>
       <groupId>org.springframework.boot</groupId>

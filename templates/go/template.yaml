@@ -5,7 +5,7 @@ metadata:
   title: Go Service
   description: >-
     Scaffold a Go "hello world" HTTP service with observability
-    (Prometheus metrics, OTel traces via otelhttp), Istio, progressive
+    (OTLP metrics, traces and trace-correlated JSON logs), Istio, progressive
     delivery via Argo Rollouts, and a full security-gated CI/CD pipeline
     already wired in.
   tags: [go, golang]

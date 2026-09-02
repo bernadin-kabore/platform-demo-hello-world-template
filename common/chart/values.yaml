@@ -1,7 +1,7 @@
 nameOverride: "${{ values.name }}"
 
 image:
-  repository: REPLACE_ACCOUNT_ID.dkr.ecr.REPLACE_REGION.amazonaws.com/${{ values.name }}
+  repository: 382334305409.dkr.ecr.us-east-1.amazonaws.com/${{ values.name }}
   tag: "0.1.0" # bumped automatically by .github/workflows/ci.yml on every merge to main
   digest: "" # set alongside tag by CI — Kyverno's verifyImages re-resolves by digest regardless
 
@@ -10,6 +10,20 @@ replicaCount: ${{ values.replicaCount }}
 owner: ${{ values.owner }}
 
 provisionS3Bucket: ${{ values.provisionS3Bucket }}
+
+# Platform-owned telemetry configuration. Applications depend on the
+# OpenTelemetry contract only — never on Prometheus, Tempo, Kafka or the log
+# store directly — so these backends can be replaced without touching any
+# service. See platform-demo-gitops/docs/observability/README.md.
+otel:
+  # The collector gateway Service. Note the release name is
+  # "otel-collector-gateway", not "otel-collector".
+  endpoint: "http://otel-collector-gateway.observability.svc.cluster.local:4317"
+  protocol: grpc
+  environment: dev
+  # service.namespace groups related services by team or domain. Defaults to
+  # the owning team when unset.
+  serviceNamespace: ""
 
 resources:
   requests: { cpu: 50m, memory: 64Mi }

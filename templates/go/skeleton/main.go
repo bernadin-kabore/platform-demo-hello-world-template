@@ -3,30 +3,26 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
+	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 const serviceName = "${{ values.name }}"
 
-var httpRequestsTotal = promauto.NewCounterVec(
-	prometheus.CounterOpts{Name: "http_requests_total", Help: "Total HTTP requests"},
-	[]string{"method", "route", "status_code"},
-)
-
 func helloHandler(w http.ResponseWriter, r *http.Request) {
+	// Logging with the request context is what attaches trace_id/span_id —
+	// slog.Info(...) without a context would produce an uncorrelated line.
+	slog.InfoContext(r.Context(), "handled hello request", "route", "/")
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{
 		"message": "Hello from " + serviceName + "!",
 		"version": envOr("APP_VERSION", "dev"),
 	})
-	httpRequestsTotal.WithLabelValues(r.Method, "/", "200").Inc()
 }
 
 func healthzHandler(w http.ResponseWriter, r *http.Request) {
@@ -43,20 +39,32 @@ func envOr(key, fallback string) string {
 
 func main() {
 	ctx := context.Background()
-	shutdown := initTracing(ctx)
-	defer shutdown()
+
+	initLogging()
+	shutdown := initTelemetry(ctx)
+	defer func() {
+		c, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := shutdown(c); err != nil {
+			slog.Error("telemetry shutdown failed", "error", err)
+		}
+	}()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", helloHandler)
 	mux.HandleFunc("/healthz", healthzHandler)
 	mux.HandleFunc("/readyz", healthzHandler)
-	mux.Handle("/metrics", promhttp.Handler())
 
-	// otelhttp.NewHandler traces every request through the mux without any
-	// per-handler span code — the Go equivalent of Node/Python's zero-code
-	// auto-instrumentation.
+	// otelhttp emits both spans AND the standard HTTP server metrics
+	// (http.server.request.duration, http.server.active_requests) against
+	// the global MeterProvider set in initTelemetry. There is no hand-rolled
+	// counter and no /metrics endpoint: metrics leave over OTLP like every
+	// other signal, so the application depends on OpenTelemetry alone.
 	handler := otelhttp.NewHandler(mux, serviceName)
 
-	log.Printf("%s listening on :8080", serviceName)
-	log.Fatal(http.ListenAndServe(":8080", handler))
+	slog.Info("starting http server", "service", serviceName, "port", 8080)
+	if err := http.ListenAndServe(":8080", handler); err != nil {
+		slog.Error("server failed", "error", err)
+		os.Exit(1)
+	}
 }
