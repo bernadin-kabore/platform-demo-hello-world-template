@@ -1,0 +1,106 @@
+# Unlike its four siblings, this template scaffolds nothing. It is a form that
+# collects a sentence of intent and hands it to the AI Platform Agent, which
+# reads the platform repositories, proposes changes, evaluates them, and opens
+# pull requests if they are good enough.
+#
+# It lives in this repository rather than in platform-demo-backstage for the
+# same reason the language templates do: templates are registered from this
+# repo's root catalog-info.yaml, so adding one is a directory plus one line
+# there and no change on the portal side.
+apiVersion: scaffolder.backstage.io/v1beta3
+kind: Template
+metadata:
+  name: ai-platform-request
+  title: Ask the Platform
+  description: >-
+    Describe what you need from the platform in your own words. The AI Platform
+    Agent works out which parts of the platform are involved, proposes the
+    changes, checks its own work, and opens pull requests for a human to review.
+    It cannot merge anything.
+  tags: [ai, platform, request]
+spec:
+  owner: platform-team
+  type: platform-request
+
+  parameters:
+    - title: What do you need?
+      required: [intent, owner]
+      properties:
+        intent:
+          title: Describe it in your own words
+          type: string
+          description: >-
+            A sentence or two is enough. Say what you want to be true, not how
+            to build it — working out how is the agent's job, and telling it
+            how usually makes the answer worse.
+          ui:widget: textarea
+          ui:options:
+            rows: 6
+          ui:autofocus: true
+          ui:placeholder: >-
+            We have no idea when a service starts crash-looping until someone
+            notices the errors. Can we get alerted on it?
+        owner:
+          title: Requesting team
+          type: string
+          description: Attributed on the pull request the agent opens
+          ui:field: OwnerPicker
+          ui:options:
+            catalogFilter:
+              kind: Group
+
+    - title: Context (optional)
+      properties:
+        service:
+          title: Does this concern one existing service?
+          type: string
+          description: >-
+            Leave blank for a platform-wide request. Naming a service gives the
+            agent a starting point rather than a whole platform to search.
+          ui:field: EntityPicker
+          ui:options:
+            catalogFilter:
+              kind: Component
+            allowArbitraryValues: false
+        waitSeconds:
+          title: How long to wait before handing back
+          type: integer
+          default: 600
+          minimum: 60
+          maximum: 1800
+          description: >-
+            A run takes minutes — four specialists reading repositories and an
+            evaluation pass. If it is still going when this expires you get the
+            request id and the run finishes in the cluster regardless.
+
+  steps:
+    - id: ai-request
+      name: Ask the AI Platform Agent
+      action: platform:ai:request
+      input:
+        intent: ${{ parameters.intent }}
+        requester: ${{ parameters.owner }}
+        service: ${{ parameters.service }}
+        waitSeconds: ${{ parameters.waitSeconds }}
+
+  # Deliberately no publish:github, no catalog:register, no GitOps PR step.
+  # This template creates nothing and registers nothing — the only artifact of
+  # a run is a set of pull requests the agent opened, each of which still has
+  # to survive CI, policy scanning, terraform plan and an approving human
+  # review before it changes anything at all.
+  output:
+    text:
+      - title: What happens next
+        content: |
+          Request `${{ steps['ai-request'].output.requestId }}` finished with
+          status **${{ steps['ai-request'].output.status }}**.
+
+          The pull requests below are labelled `ai-generated` and
+          `needs-human-approval`. Each carries the agent's reasoning, the files
+          it changed and why, anything it could not decide for itself, and its
+          full evaluation report. Nothing has been merged and nothing has been
+          deployed.
+    links:
+      - title: Generated pull requests
+        url: https://github.com/pulls?q=is%3Apr+is%3Aopen+label%3Aai-generated
+        icon: github

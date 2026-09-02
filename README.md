@@ -4,10 +4,14 @@ Four Backstage software templates — one per language — that each turn "I
 need a new service" into a running, observed, security-gated,
 progressively-deployed application in one form submission.
 
+Plus a fifth template that is not like the others: **Ask the Platform**, for
+requests the platform has no golden path for yet. See
+[Ask the Platform](#ask-the-platform) below.
+
 ## Layout
 
 ```
-catalog-info.yaml     Location entity listing all four template.yaml files —
+catalog-info.yaml     Location entity listing all five template.yaml files —
                        the one thing registered in Backstage's app-config.yaml
 .github/workflows/
 └── code-coverage.yml  Reusable workflow (workflow_call): runs each language's
@@ -24,8 +28,10 @@ templates/
 ├── nodejs/            Express + OTel auto-instrumentation (--require)
 ├── python/            FastAPI + OTel zero-code instrumentation (opentelemetry-instrument)
 ├── go/                 net/http + otelhttp middleware
-└── java/               Spring Boot + the OTel Java agent (-javaagent)
-    └── template.yaml  + skeleton/  (language-specific: source, Dockerfile, CI)
+├── java/               Spring Boot + the OTel Java agent (-javaagent)
+│   └── template.yaml  + skeleton/  (language-specific: source, Dockerfile, CI)
+└── ai-platform-request/  No skeleton: a form, not a scaffolder
+    └── template.yaml
 ```
 
 ## Coverage gate
@@ -129,3 +135,46 @@ thing this whole repo set is demonstrating.
    `fetch:template` URLs stay `../../common` and `./skeleton`.
 3. Add one line to `catalog-info.yaml`'s `spec.targets`. Nothing else in
    `common/`, `gitops-pr/`, or `platform-demo-backstage` changes.
+
+## Ask the Platform
+
+The four language templates cover the case the platform already has a golden
+path for. `templates/ai-platform-request/` covers the case it does not.
+
+It scaffolds nothing. There is no skeleton directory, no `publish:github`, no
+`catalog:register`, no GitOps pull request step. It is a textarea and one
+action:
+
+```
+Developer describes what they want
+   ↓
+platform:ai:request  (platform-demo-backstage/packages/backend/src/modules/ai-platform-request)
+   ↓
+AI Platform Agent    (platform-demo-ai-agent, running in the cluster)
+   ↓
+Terraform / Application / Security / Observability specialists
+   ↓
+Automated evals — deterministic checks, then a review model
+   ↓
+Pull requests, labelled ai-generated and needs-human-approval
+```
+
+From the pull request onwards it is the same pipeline a hand-written change
+travels: the `test`/`sast`/`sca`/`coverage` gates, Checkov and `terraform plan`
+on infrastructure changes, an approving human review required by branch
+protection, then ArgoCD.
+
+**Why it lives here rather than in the portal repository.** The same reason the
+language templates do: templates are registered from this repo's root
+`catalog-info.yaml`, so adding one is a directory plus one line there, and the
+Backstage repository needs no change at all.
+
+**Why the form asks for intent rather than a specification.** "We have no idea
+when a service starts crash-looping" produces a better change than "add a
+PrometheusRule with expr X". Working out the *how* is what the specialists are
+for, and they know this platform's conventions — that Prometheus already
+discovers rules in every namespace, that an alert without a documented response
+is noise — better than a form field can capture.
+
+**The agent cannot merge anything.** Its GitHub App holds no bypass on any
+ruleset in the platform, including on its own repository.
