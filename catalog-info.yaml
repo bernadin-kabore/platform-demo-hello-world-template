@@ -5,10 +5,16 @@ apiVersion: backstage.io/v1alpha1
 kind: Location
 metadata:
   name: hello-world-templates
-  description: Every language variant of the "hello world" scaffolder template
+  description: >-
+    Every scaffolder template the portal offers: the four "hello world"
+    language variants, plus the AI Platform Agent request form
 spec:
   targets:
     - ./templates/nodejs/template.yaml
     - ./templates/python/template.yaml
     - ./templates/go/template.yaml
     - ./templates/java/template.yaml
+    # Not a language variant and not a scaffolder in the usual sense: it
+    # creates no repository. It is the entry point for a request the platform
+    # has no template for yet — see templates/ai-platform-request/.
+    - ./templates/ai-platform-request/template.yaml
