@@ -1,0 +1,172 @@
+name: service-build
+
+# Build one service's container image, prove it is safe, and publish it as an
+# immutable, signed, attested artifact. Nothing in this file deploys anything.
+#
+# ---------------------------------------------------------------------------
+# THIS FILE IS THE IDENTITY KYVERNO VERIFIES. READ THIS BEFORE MOVING IT.
+# ---------------------------------------------------------------------------
+#
+# `cosign sign` below is keyless: it exchanges this workflow's GitHub OIDC
+# token for a short-lived Fulcio certificate and records the signature in
+# Rekor. The certificate's subject is taken from the token's `job_workflow_ref`
+# claim — which, for a reusable workflow, is *this* file's ref, not the caller's.
+# So every image the platform produces is signed as:
+#
+#   https://github.com/bernadin-kabore/platform-demo-hello-world-template/\
+#     .github/workflows/service-build.yml@refs/heads/main
+#
+# and platform-demo-gitops/apps/kyverno/policies/{require-signed-images,
+# require-sbom-attestation}.yaml pin exactly that string. Renaming this file,
+# moving these steps back into a caller, or changing the branch it is called
+# from all change the recorded identity, and the next pod to be admitted is
+# refused with a signature verification failure.
+#
+# That coupling buys something. The previous arrangement signed from each
+# service repository's own ci.yml, so the policy had to accept the wildcard
+# `bernadin-kabore/*/.github/workflows/ci.yml@refs/heads/main` — any repository
+# in the account with a ci.yml on main satisfied it. Pinning one
+# platform-owned file replaces that wildcard with a single exact path.
+#
+# ---------------------------------------------------------------------------
+# Stage ordering is load-bearing
+# ---------------------------------------------------------------------------
+#
+# build (not pushed) -> scan -> push -> SBOM -> sign -> attest.
+#
+# The image is built locally and scanned before it is allowed to exist in ECR,
+# so a HIGH/CRITICAL CVE never reaches the registry at all rather than reaching
+# it and being caught later. Do not reorder these to save a build.
+
+on:
+  workflow_call:
+    inputs:
+      service:
+        description: Service name — names the artifact this workflow hands back
+        type: string
+        required: true
+      working-directory:
+        description: Docker build context, relative to the repository root
+        type: string
+        required: true
+      ecr-repository:
+        description: Full ECR repository URI for this service
+        type: string
+        required: true
+      aws-region:
+        type: string
+        required: true
+      image-tag:
+        description: Immutable tag to publish — the source commit's short SHA
+        type: string
+        required: true
+    secrets:
+      aws-role-arn:
+        description: Role assumed via GitHub OIDC; may push only this application's ECR repositories
+        required: true
+    outputs:
+      digest:
+        description: The published image digest
+        value: ${{ jobs.build.outputs.digest }}
+
+permissions:
+  contents: read
+  id-token: write # OIDC federation to AWS + Sigstore keyless signing, no static secrets
+  security-events: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.aws-role-arn }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - uses: aws-actions/amazon-ecr-login@v2
+        id: ecr-login
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build image (not pushed yet)
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ inputs.working-directory }}
+          push: false
+          load: true
+          tags: ${{ inputs.ecr-repository }}:${{ inputs.image-tag }}
+
+      - name: Trivy image scan
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          image-ref: ${{ inputs.ecr-repository }}:${{ inputs.image-tag }}
+          severity: HIGH,CRITICAL
+          exit-code: "1" # fails the build — nothing with a known HIGH/CRITICAL CVE ships
+          format: sarif
+          output: trivy-image-${{ inputs.service }}.sarif
+
+      - name: Upload Trivy image results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-image-${{ inputs.service }}.sarif
+          category: trivy-image-${{ inputs.service }}
+
+      - name: Push image
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ inputs.working-directory }}
+          push: true
+          tags: ${{ inputs.ecr-repository }}:${{ inputs.image-tag }}
+
+      - name: Generate SBOM (SPDX)
+        uses: anchore/sbom-action@v0.17.2
+        with:
+          image: "${{ inputs.ecr-repository }}@${{ steps.push.outputs.digest }}"
+          format: spdx-json
+          output-file: sbom-${{ inputs.service }}.spdx.json
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign image (keyless, via GitHub OIDC + Fulcio/Rekor)
+        run: |
+          cosign sign --yes "${{ inputs.ecr-repository }}@${{ steps.push.outputs.digest }}"
+
+      - name: Attest SBOM to the image
+        run: |
+          cosign attest --yes \
+            --predicate sbom-${{ inputs.service }}.spdx.json \
+            --type spdxjson \
+            "${{ inputs.ecr-repository }}@${{ steps.push.outputs.digest }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ inputs.service }}
+          path: sbom-${{ inputs.service }}.spdx.json
+
+      # The image reference, handed to the GitOps PR job as a file rather than
+      # a job output. A matrix job's outputs collapse to whichever copy of the
+      # job finished last, so N services building in parallel would produce one
+      # surviving digest and silently deploy the wrong image for the rest.
+      # One artifact per service cannot collide.
+      - name: Record the published image reference
+        run: |
+          cat > image-ref-${{ inputs.service }}.json <<JSON
+          {
+            "service": "${{ inputs.service }}",
+            "repository": "${{ inputs.ecr-repository }}",
+            "tag": "${{ inputs.image-tag }}",
+            "digest": "${{ steps.push.outputs.digest }}"
+          }
+          JSON
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: image-ref-${{ inputs.service }}
+          path: image-ref-${{ inputs.service }}.json

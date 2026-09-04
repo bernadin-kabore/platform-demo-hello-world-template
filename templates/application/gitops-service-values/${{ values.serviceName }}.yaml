@@ -1,0 +1,32 @@
+# Desired state for one service in one environment.
+#
+# This file is both the ArgoCD ApplicationSet's generator input and the Helm
+# values ArgoCD renders the chart with — which is why serviceName and
+# environment appear as keys rather than being parsed back out of the file
+# path. The chart ignores them.
+#
+# The application's CI pipeline writes exactly two keys here, image.tag and
+# image.digest, and only in the dev copy. Staging and production receive the
+# same two keys through a promotion pull request. Everything else below is
+# yours: change it in a pull request like any other deployment change.
+serviceName: ${{ values.serviceName }}
+environment: ${{ values.environment }}
+
+nameOverride: ${{ values.appName }}-${{ values.serviceName }}
+
+image:
+  repository: ${{ values.ecrRegistry }}/${{ values.appName }}-${{ values.serviceName }}
+  # Placeholder until the first successful build of this service. Until then
+  # ArgoCD will report the workload as unhealthy, which is accurate: nothing
+  # has been published for it yet.
+  tag: "0.1.0"
+  digest: ""
+
+istio:
+  gatewayHost: "${{ values.appName }}-${{ values.serviceName }}.${{ values.environment }}.platform-demo.acme.io"
+
+provisionS3Bucket: ${{ values.provisionS3Bucket }}
+
+resources:
+  requests: { cpu: 50m, memory: 64Mi }
+  limits: { memory: 128Mi }

@@ -1,20 +1,21 @@
 # Registered as a single `url` catalog location in platform-demo-backstage's
-# app-config.yaml, so adding a 5th language later is "add a directory under
-# templates/ + one line here" — no change needed on the Backstage side.
+# app-config.yaml, so changing what the portal offers is a change here and
+# nowhere else.
 apiVersion: backstage.io/v1alpha1
 kind: Location
 metadata:
-  name: hello-world-templates
+  name: platform-templates
   description: >-
-    Every scaffolder template the portal offers: the four "hello world"
-    language variants, plus the AI Platform Agent request form
+    Every scaffolder template the portal offers: the golden path for creating
+    an application, and the AI Platform Agent request form
 spec:
   targets:
-    - ./templates/nodejs/template.yaml
-    - ./templates/python/template.yaml
-    - ./templates/go/template.yaml
-    - ./templates/java/template.yaml
-    # Not a language variant and not a scaffolder in the usual sense: it
-    # creates no repository. It is the entry point for a request the platform
-    # has no template for yet — see templates/ai-platform-request/.
+    # The golden path. One run creates an application's source repository, its
+    # GitOps repository, and the catalog entities for both — with as many
+    # services in as many languages as the developer asked for. It replaced the
+    # four per-language templates, whose skeletons it still uses.
+    - ./templates/application/template.yaml
+    # Not a scaffolder in the usual sense: it creates no repository. It is the
+    # entry point for a request the platform has no template for yet — see
+    # templates/ai-platform-request/.
     - ./templates/ai-platform-request/template.yaml

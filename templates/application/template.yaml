@@ -1,0 +1,351 @@
+# The golden path. One form, one run, one application.
+#
+# It replaces the four per-language templates that came before it. Those
+# templates each created one repository holding one service, which meant an
+# application made of four microservices was four repositories, four copies of
+# a 220-line pipeline, four ArgoCD Applications registered by hand, and no
+# entity anywhere that said those four things were one product. The unit of the
+# platform is now the application.
+#
+# What one run produces:
+#
+#   <name>-source    every service's code, one pipeline, the catalog entities
+#   <name>-gitops    the deployment state for all of them, in three environments
+#
+# and, in the software catalog, one System with one Component per service, each
+# carrying the annotations that let the platform — and Ask the Platform —
+# resolve where any given change belongs without guessing.
+#
+# The number of services and their languages come from the form. Nothing below
+# is written in terms of the four languages that happen to have skeletons
+# today; adding a fifth is adding a directory under templates/ and one entry to
+# the language enum.
+apiVersion: scaffolder.backstage.io/v1beta3
+kind: Template
+metadata:
+  name: application
+  title: New Application
+  description: >-
+    Create an application: one source repository holding as many microservices
+    as you need in whichever languages you need, and one GitOps repository
+    holding their deployment state across dev, staging and production. Each
+    service gets its own image, its own tests and scans, and its own place in
+    the catalog — with observability, Istio, progressive delivery and a
+    security-gated pipeline already wired in.
+  tags: [recommended, application, golden-path]
+spec:
+  owner: platform-team
+  type: system
+
+  parameters:
+    - title: The application
+      required: [appName, owner, description]
+      properties:
+        appName:
+          title: Application name
+          type: string
+          description: >-
+            The product this is, not the services inside it. Used for both
+            repository names, the Backstage System, and as the prefix on every
+            service's component, namespace and image repository.
+          pattern: "^[a-z][a-z0-9-]{2,20}$"
+          ui:autofocus: true
+          ui:placeholder: checkout-platform
+        description:
+          title: What does it do?
+          type: string
+        owner:
+          title: Owning team
+          type: string
+          ui:field: OwnerPicker
+          ui:options:
+            catalogFilter:
+              kind: Group
+
+    - title: The services inside it
+      required: [services]
+      properties:
+        services:
+          title: Microservices
+          type: array
+          minItems: 1
+          maxItems: 10
+          description: >-
+            One entry per independently deployable service. Each gets its own
+            directory, its own container image, and its own deployment state in
+            every environment — they are only sharing a repository, not a
+            release. You can add more later by editing platform.yaml; you do
+            not have to get this complete now.
+          items:
+            type: object
+            required: [name, language, description]
+            properties:
+              name:
+                title: Service name
+                type: string
+                description: Short, and unique within this application — "auth", not "checkout-auth"
+                pattern: "^[a-z][a-z0-9-]{1,15}$"
+              language:
+                title: Language / runtime
+                type: string
+                enum: [nodejs, python, go, java]
+                enumNames: [Node.js (Express), Python (FastAPI), Go, Java (Spring Boot)]
+              description:
+                title: What this service does
+                type: string
+
+    - title: Infrastructure options
+      properties:
+        provisionS3Bucket:
+          title: Provision an S3 bucket for each service?
+          type: boolean
+          default: false
+          description: Creates a Crossplane S3Bucket claim alongside each service — demonstrates self-service cloud infra with no direct AWS console/Terraform access needed
+        ecrRegistry:
+          title: ECR registry host
+          type: string
+          default: "382334305409.dkr.ecr.us-east-1.amazonaws.com"
+          description: Image repositories are created by Terraform as <registry>/<application>-<service>
+
+    - title: Repository location
+      required: [repoUrl]
+      properties:
+        repoUrl:
+          title: Where the source repository goes
+          type: string
+          description: The GitOps repository is created alongside it, with "-gitops" in place of "-source"
+          ui:field: RepoUrlPicker
+          ui:options:
+            allowedHosts: [github.com]
+
+  steps:
+    # -----------------------------------------------------------------
+    # The source repository
+    # -----------------------------------------------------------------
+    - id: source-skeleton
+      name: Render the application source repository
+      action: fetch:template
+      input:
+        url: ./skeleton
+        values: &appValues
+          appName: ${{ parameters.appName }}
+          description: ${{ parameters.description }}
+          owner: ${{ parameters.owner }}
+          services: ${{ parameters.services }}
+          provisionS3Bucket: ${{ parameters.provisionS3Bucket }}
+          ecrRegistry: ${{ parameters.ecrRegistry }}
+          gitopsRepoName: ${{ parameters.appName }}-gitops
+          destination: ${{ parameters.repoUrl | parseRepoUrl }}
+        # ci.yml is copied, never rendered. It contains GitHub Actions
+        # expressions — ${{ github.sha }} and friends — which share their
+        # syntax with this templating engine, and rendering it would quietly
+        # replace every one of them with an empty string. The pipeline is
+        # driven by platform.yaml at runtime instead, which is why it needs no
+        # scaffold-time substitution at all.
+        copyWithoutTemplating:
+          - .github/workflows/*
+
+    # One iteration per service: the language skeleton the developer chose,
+    # unpacked into that service's own directory. This is the step that makes
+    # "N services, N languages, one repository" true rather than aspirational.
+    - id: service-skeletons
+      name: Add each service
+      each: ${{ parameters.services }}
+      action: fetch:template
+      input:
+        url: ../${{ each.value.language }}/skeleton
+        targetPath: ./services/${{ each.value.name }}
+        values:
+          name: ${{ each.value.name }}
+          description: ${{ each.value.description }}
+
+    - id: publish-source
+      name: Publish the source repository
+      action: publish:github
+      input:
+        allowedHosts: [github.com]
+        description: ${{ parameters.description }}
+        repoUrl: ${{ parameters.repoUrl }}
+        defaultBranch: main
+        # Protection comes from the branch-protection step below instead of
+        # publish:github's classic-rule support — one ruleset covers
+        # main/develop/release/* together rather than layering two protection
+        # systems on top of each other.
+        protectDefaultBranch: false
+        repoVariables:
+          ECR_REGISTRY: ${{ parameters.ecrRegistry }}
+          AWS_REGION: us-east-1
+
+    - id: protect-source
+      name: Protect the source repository's branches
+      action: platform:github:branch-protection
+      input:
+        owner: ${{ (parameters.repoUrl | parseRepoUrl).owner }}
+        repo: ${{ (parameters.repoUrl | parseRepoUrl).repo }}
+        # A matrix job's name contains the service it is running for, which is
+        # not knowable when a ruleset is written. ci-gate fans every stage in
+        # and reports one context that can be required; semgrep and gitleaks
+        # are repository-wide and have fixed names of their own.
+        requiredStatusChecks: [ci-gate, semgrep, gitleaks]
+
+    # -----------------------------------------------------------------
+    # The GitOps repository
+    # -----------------------------------------------------------------
+    - id: gitops-skeleton
+      name: Render the GitOps repository
+      action: fetch:template
+      input:
+        url: ./gitops-skeleton
+        targetPath: ./gitops
+        values: *appValues
+        copyWithoutTemplating:
+          - .github/workflows/*
+          - chart/templates/*
+
+    # The per-service, per-environment desired state: one file per service in
+    # each of dev, staging and prod. Three steps rather than a nested loop
+    # because a scaffolder step iterates one list, and being explicit about
+    # which environments exist is worth more here than being clever.
+    - id: gitops-dev
+      name: Deployment state for dev
+      each: ${{ parameters.services }}
+      action: fetch:template
+      input:
+        url: ./gitops-service-values
+        targetPath: ./gitops/environments/dev/services
+        values:
+          serviceName: ${{ each.value.name }}
+          environment: dev
+          appName: ${{ parameters.appName }}
+          ecrRegistry: ${{ parameters.ecrRegistry }}
+          provisionS3Bucket: ${{ parameters.provisionS3Bucket }}
+
+    - id: gitops-staging
+      name: Deployment state for staging
+      each: ${{ parameters.services }}
+      action: fetch:template
+      input:
+        url: ./gitops-service-values
+        targetPath: ./gitops/environments/staging/services
+        values:
+          serviceName: ${{ each.value.name }}
+          environment: staging
+          appName: ${{ parameters.appName }}
+          ecrRegistry: ${{ parameters.ecrRegistry }}
+          provisionS3Bucket: ${{ parameters.provisionS3Bucket }}
+
+    - id: gitops-prod
+      name: Deployment state for production
+      each: ${{ parameters.services }}
+      action: fetch:template
+      input:
+        url: ./gitops-service-values
+        targetPath: ./gitops/environments/prod/services
+        values:
+          serviceName: ${{ each.value.name }}
+          environment: prod
+          appName: ${{ parameters.appName }}
+          ecrRegistry: ${{ parameters.ecrRegistry }}
+          provisionS3Bucket: ${{ parameters.provisionS3Bucket }}
+
+    - id: publish-gitops
+      name: Publish the GitOps repository
+      action: publish:github
+      input:
+        allowedHosts: [github.com]
+        description: Deployment state for ${{ parameters.appName }}
+        repoUrl: github.com?owner=${{ (parameters.repoUrl | parseRepoUrl).owner }}&repo=${{ parameters.appName }}-gitops
+        defaultBranch: main
+        protectDefaultBranch: false
+        sourcePath: ./gitops
+
+    - id: protect-gitops
+      name: Protect the GitOps repository's branches
+      action: platform:github:branch-protection
+      input:
+        owner: ${{ (parameters.repoUrl | parseRepoUrl).owner }}
+        repo: ${{ parameters.appName }}-gitops
+        requiredStatusChecks: [render]
+        # Deliberately no deploy-bot bypass. The source pipeline opens pull
+        # requests here; it does not merge them, and it must not be able to.
+        # This is the difference between the platform's old model, where CI
+        # pushed image bumps straight to a protected branch, and this one.
+        allowDeployBotBypass: false
+
+    # -----------------------------------------------------------------
+    # Register everything
+    # -----------------------------------------------------------------
+    - id: register-source
+      name: Register the application and its services
+      action: catalog:register
+      input:
+        repoContentsUrl: ${{ steps['publish-source'].output.repoContentsUrl }}
+        catalogInfoPath: /catalog-info.yaml
+
+    - id: register-gitops
+      name: Register the GitOps repository
+      action: catalog:register
+      input:
+        repoContentsUrl: ${{ steps['publish-gitops'].output.repoContentsUrl }}
+        catalogInfoPath: /catalog-info.yaml
+
+    # Tell ArgoCD this application exists. The ApplicationSet that generates
+    # one Application per service per environment lives in the application's
+    # own GitOps repository; this pull request adds the one pointer that makes
+    # ArgoCD go and read it. Merging it is what turns the application on.
+    - id: fetch-registration
+      name: Render the platform registration
+      action: fetch:template
+      input:
+        url: ./platform-registration
+        targetPath: ./registration
+        values:
+          appName: ${{ parameters.appName }}
+          owner: ${{ parameters.owner }}
+          gitopsRepoUrl: ${{ steps['publish-gitops'].output.remoteUrl }}
+
+    - id: register-with-argocd
+      name: Open a PR registering the application with ArgoCD
+      action: publish:github:pull-request
+      input:
+        repoUrl: github.com?owner=bernadin-kabore&repo=platform-demo-gitops
+        branchName: register-${{ parameters.appName }}
+        title: "Register ${{ parameters.appName }} with ArgoCD"
+        description: |
+          Opened automatically by the New Application scaffolder template.
+
+          Adds `applications/${{ parameters.appName }}.json`, which points
+          ArgoCD at
+          ${{ steps['publish-gitops'].output.remoteUrl }}
+          and nothing else. That repository's own ApplicationSet is what
+          generates one Application per service per environment.
+
+          Merging this is what starts deployment. Until then both repositories
+          exist, CI works, and images are published — but nothing is running.
+        sourcePath: ./registration
+
+  output:
+    links:
+      - title: Source repository
+        url: ${{ steps['publish-source'].output.remoteUrl }}
+      - title: GitOps repository
+        url: ${{ steps['publish-gitops'].output.remoteUrl }}
+      - title: Open in catalog
+        icon: catalog
+        entityRef: ${{ steps['register-source'].output.entityRef }}
+      - title: Pull request that turns it on
+        url: ${{ steps['register-with-argocd'].output.remoteUrl }}
+    text:
+      - title: What was created
+        content: |
+          **${{ parameters.appName }}** now exists as two repositories and
+          ${{ parameters.services | length }} service(s) in the catalog.
+
+          Before anything deploys, two things need a human:
+
+          1. Merge the pull request above against `platform-demo-gitops` — that
+             is what tells ArgoCD the application exists.
+          2. Set `AWS_CI_ROLE_ARN` and the deploy-bot secrets on the source
+             repository, and add this application to the `applications` map in
+             `platform-demo-terraform-modules/envs/dev`. Until Terraform has
+             run, there is no ECR repository to push to and no role to assume.

@@ -1,0 +1,13 @@
+# One chart, rendered once per service per environment.
+#
+# It used to be copied into every service repository and renamed after that
+# service, which meant a fix to the canary strategy or the security context had
+# to be applied N times and never was. The chart is now application-scoped and
+# generic: the service it is rendering is `nameOverride`, supplied by the
+# per-service values file, so the same templates produce every workload.
+apiVersion: v2
+name: service
+description: The platform's deployment contract — Rollout, Service, mesh routing, autoscaling and namespace policy for one service
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

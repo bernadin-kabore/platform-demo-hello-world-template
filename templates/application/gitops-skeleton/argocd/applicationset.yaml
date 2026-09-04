@@ -1,0 +1,86 @@
+# How this application's services get deployed.
+#
+# One ApplicationSet, living in the application's own GitOps repository,
+# generating one ArgoCD Application per (service, environment) pair. The
+# generator walks environments/*/services/*.yaml — so a service exists in an
+# environment exactly when its values file does, and adding a service to
+# staging is adding one file rather than editing this one.
+#
+# Each generated Application layers three value sources in widening
+# specificity: the chart's own defaults, then the environment's, then the
+# service's. The last of those is the only file CI ever writes, and it writes
+# exactly two keys in it.
+#
+# ---------------------------------------------------------------------------
+# The trade this represents
+# ---------------------------------------------------------------------------
+#
+# Discovery used to live in platform-demo-gitops, where one ApplicationSet
+# covered every service on the platform and only the platform team could
+# change it. It now lives here, next to the deployment state it governs, which
+# is what makes an application self-contained. The cost is that whoever can
+# merge to this repository's default branch can change how these Applications
+# are generated — including which project they run under. That is why this
+# repository is created with the same branch protection as any other: pull
+# request, review, passing checks, signed commits. The AppProject the
+# generated Applications run under (`workloads`) is still defined in
+# platform-demo-gitops and still whitelists only the resource kinds a
+# developer workload may create, so the blast radius of an edit here stops at
+# what that project permits.
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: ${{ values.appName }}
+  namespace: argocd
+spec:
+  goTemplate: true
+  generators:
+    - git:
+        repoURL: https://github.com/${{ values.destination.owner }}/${{ values.gitopsRepoName }}.git
+        revision: main
+        files:
+          # Every file is a service's desired state in one environment. The
+          # file's own contents become the generator's parameters, which is
+          # why serviceName and environment are keys inside it rather than
+          # being parsed back out of the path.
+          - path: "environments/*/services/*.yaml"
+  template:
+    metadata:
+      name: "${{ values.appName }}-{{.serviceName}}-{{.environment}}"
+      labels:
+        team: "${{ values.owner }}"
+        platform.acme.io/application: "${{ values.appName }}"
+        platform.acme.io/service: "{{.serviceName}}"
+        platform.acme.io/environment: "{{.environment}}"
+    spec:
+      project: workloads
+      source:
+        repoURL: https://github.com/${{ values.destination.owner }}/${{ values.gitopsRepoName }}.git
+        targetRevision: main
+        path: chart
+        helm:
+          valueFiles:
+            - ../environments/{{.environment}}/env-values.yaml
+            - ../environments/{{.environment}}/services/{{.serviceName}}.yaml
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: "${{ values.appName }}-{{.serviceName}}-{{.environment}}"
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true
+        managedNamespaceMetadata:
+          labels:
+            platform.acme.io/managed: "true"
+            pod-security.kubernetes.io/enforce: restricted
+            pod-security.kubernetes.io/audit: restricted
+            pod-security.kubernetes.io/warn: restricted
+            istio-injection: enabled
+        retry:
+          limit: 5
+          backoff:
+            duration: 30s
+            factor: 2
+            maxDuration: 5m

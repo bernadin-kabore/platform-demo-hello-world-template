@@ -1,0 +1,67 @@
+# The catalog model for this application.
+#
+# One System — the application — and one Component per deployable service. The
+# distinction matters because they are different things: the System is what a
+# team owns and reasons about, the Component is what actually gets built into
+# an image and rolled out.
+#
+# The annotations on each Component are not decoration. They are the only
+# authoritative answer to "where does a change to this service belong", and
+# Ask the Platform reads them rather than guessing repository names from what a
+# developer typed. Four facts, all machine-resolvable:
+#
+#   source-repo     the repository holding the code
+#   source-path     that service's directory within it
+#   gitops-repo     the repository holding the deployment state
+#   gitops-service  that service's key within it, from which the platform
+#                   derives environments/<env>/services/<key>.yaml
+#
+# If you move a service's directory, change source-path in the same commit. A
+# stale annotation does not fail loudly — it sends a correct change to the
+# wrong place.
+apiVersion: backstage.io/v1alpha1
+kind: System
+metadata:
+  name: ${{ values.appName }}
+  description: ${{ values.description }}
+  annotations:
+    github.com/project-slug: ${{ values.destination.owner }}/${{ values.destination.repo }}
+    backstage.io/techdocs-ref: dir:.
+    platform.acme.io/source-repo: ${{ values.destination.repo }}
+    platform.acme.io/gitops-repo: ${{ values.gitopsRepoName }}
+  links:
+    - url: https://github.com/${{ values.destination.owner }}/${{ values.gitopsRepoName }}
+      title: Deployment state (GitOps)
+      icon: github
+spec:
+  owner: ${{ values.owner }}
+{% for service in values.services %}
+---
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: ${{ values.appName }}-${{ service.name }}
+  description: ${{ service.description }}
+  tags:
+    - ${{ service.language }}
+  annotations:
+    github.com/project-slug: ${{ values.destination.owner }}/${{ values.destination.repo }}
+    backstage.io/kubernetes-id: ${{ values.appName }}-${{ service.name }}
+    backstage.io/techdocs-ref: dir:.
+    argocd/app-name: ${{ values.appName }}-${{ service.name }}-dev
+    platform.acme.io/application: ${{ values.appName }}
+    platform.acme.io/source-repo: ${{ values.destination.repo }}
+    platform.acme.io/source-path: services/${{ service.name }}
+    platform.acme.io/gitops-repo: ${{ values.gitopsRepoName }}
+    platform.acme.io/gitops-service: ${{ service.name }}
+  links:
+    - url: https://kiali.platform-demo.acme.io/console/namespaces/${{ values.appName }}-${{ service.name }}-dev/services/${{ values.appName }}-${{ service.name }}
+      title: Service mesh (Kiali)
+      icon: web
+spec:
+  type: service
+  lifecycle: production
+  owner: ${{ values.owner }}
+  system: ${{ values.appName }}
+  providesApis: []
+{% endfor %}

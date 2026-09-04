@@ -1,0 +1,248 @@
+name: service-validate
+
+# Everything that has to pass before one service in an application source
+# repository is allowed to be built: its language's lint and unit tests, static
+# analysis of its own source, and its third-party dependencies.
+#
+# Why this is a reusable workflow. Before the application model, each service
+# lived in its own repository and carried its own ~220-line ci.yml, copied from
+# a language template. Four copies of the same pipeline drifted independently
+# and a fix to one never reached the other three. An application source
+# repository now holds N services in possibly N languages, so that duplication
+# would have been multiplied rather than merely tolerated. The caller decides
+# *which* services to validate; this file decides *how*, once, for everyone.
+#
+# What is deliberately NOT here: Semgrep and gitleaks. Both scan a whole
+# repository rather than a subdirectory — gitleaks reads git history, Semgrep's
+# action has no path scoping — so running them per service would scan the same
+# tree N times and report every finding N times. They stay as repo-level jobs
+# in the caller's ci.yml, running once per CI run. Same tools, same blocking
+# behaviour, one invocation.
+#
+# Every fail condition below is the one the four language templates already
+# used. Nothing here is advisory that used to block, and Bandit keeps its
+# pre-existing non-blocking `|| true` rather than being silently promoted to a
+# gate under cover of a refactor.
+
+on:
+  workflow_call:
+    inputs:
+      service:
+        description: Service name, used only in step and artifact names
+        type: string
+        required: true
+      language:
+        description: One of nodejs, python, go, java
+        type: string
+        required: true
+      working-directory:
+        description: The service's directory, relative to the repository root
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  # ---------------------------------------------------------------------
+  # 1. Lint and unit tests, in the service's own toolchain.
+  # ---------------------------------------------------------------------
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # --- Node.js -------------------------------------------------------
+      - if: inputs.language == 'nodejs'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: ${{ inputs.working-directory }}/package-lock.json
+      - if: inputs.language == 'nodejs'
+        run: npm ci
+      - if: inputs.language == 'nodejs'
+        run: npm run lint
+      - if: inputs.language == 'nodejs'
+        run: npm test
+
+      # --- Python --------------------------------------------------------
+      - if: inputs.language == 'python'
+        uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - if: inputs.language == 'python'
+        run: pip install -r requirements-dev.txt
+      - if: inputs.language == 'python'
+        run: ruff check app
+      - if: inputs.language == 'python'
+        run: pytest
+
+      # --- Go ------------------------------------------------------------
+      - if: inputs.language == 'go'
+        uses: actions/setup-go@v5
+        with: { go-version: "1.22" }
+      - if: inputs.language == 'go'
+        run: go vet ./...
+      - if: inputs.language == 'go'
+        run: go test ./... -v
+      - if: inputs.language == 'go'
+        uses: golangci/golangci-lint-action@v6
+        with:
+          working-directory: ${{ inputs.working-directory }}
+
+      # --- Java ----------------------------------------------------------
+      - if: inputs.language == 'java'
+        uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: "21", cache: maven }
+      - if: inputs.language == 'java'
+        run: mvn -B test
+
+  # ---------------------------------------------------------------------
+  # 2. SAST — static analysis of the service's own source.
+  #
+  #    CodeQL is scoped with source-root so a finding is attributed to the
+  #    service that owns it rather than to the application as a whole; without
+  #    it, every service's analysis would report every other service's alerts.
+  # ---------------------------------------------------------------------
+  sast:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ inputs.language == 'nodejs' && 'javascript' || inputs.language }}
+          source-root: ${{ inputs.working-directory }}
+
+      # CodeQL cannot analyse a compiled language it has not seen built, so
+      # Java gets its build here rather than relying on autobuild guessing at a
+      # multi-service repository's layout.
+      - if: inputs.language == 'java'
+        uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: "21", cache: maven }
+      - if: inputs.language == 'java'
+        run: mvn -B package -DskipTests
+        working-directory: ${{ inputs.working-directory }}
+
+      - name: CodeQL analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: ${{ inputs.service }}
+
+      # --- Python: Bandit ------------------------------------------------
+      # Non-blocking, exactly as it was in the Python template. Changing a
+      # gate's severity is a deliberate decision, not something a refactor
+      # gets to do quietly.
+      - if: inputs.language == 'python'
+        uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - if: inputs.language == 'python'
+        run: pip install bandit
+      - if: inputs.language == 'python'
+        name: Bandit
+        run: bandit -r app -f sarif -o bandit-results.sarif || true
+        working-directory: ${{ inputs.working-directory }}
+      - if: inputs.language == 'python'
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: ${{ inputs.working-directory }}/bandit-results.sarif
+          category: bandit-${{ inputs.service }}
+
+      # --- Go: gosec -----------------------------------------------------
+      - if: inputs.language == 'go'
+        name: gosec
+        uses: securego/gosec@master
+        with:
+          args: -fmt sarif -out ${{ inputs.working-directory }}/gosec-results.sarif ./${{ inputs.working-directory }}/...
+      - if: always() && inputs.language == 'go'
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: ${{ inputs.working-directory }}/gosec-results.sarif
+          category: gosec-${{ inputs.service }}
+
+  # ---------------------------------------------------------------------
+  # 3. SCA — the service's third-party dependencies.
+  #
+  #    Trivy's filesystem scan is pointed at the service directory rather than
+  #    the repository root: in a multi-service repository a root scan would
+  #    fail one service's build on another service's vulnerable lockfile, and
+  #    the team that could fix it would never see the failure.
+  # ---------------------------------------------------------------------
+  sca:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # --- Node.js -------------------------------------------------------
+      - if: inputs.language == 'nodejs'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: ${{ inputs.working-directory }}/package-lock.json
+      - if: inputs.language == 'nodejs'
+        run: npm ci
+      - if: inputs.language == 'nodejs'
+        name: npm audit (fail on high/critical)
+        run: npm audit --audit-level=high
+
+      # --- Python --------------------------------------------------------
+      - if: inputs.language == 'python'
+        uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - if: inputs.language == 'python'
+        run: pip install pip-audit
+      - if: inputs.language == 'python'
+        name: pip-audit (fail on any known vuln)
+        run: pip-audit -r requirements.txt
+
+      # --- Go ------------------------------------------------------------
+      - if: inputs.language == 'go'
+        uses: actions/setup-go@v5
+        with: { go-version: "1.22" }
+      - if: inputs.language == 'go'
+        name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+      # --- Java ----------------------------------------------------------
+      - if: inputs.language == 'java'
+        name: OWASP Dependency-Check
+        uses: dependency-check/Dependency-Check_Action@main
+        with:
+          project: ${{ inputs.service }}
+          path: ${{ inputs.working-directory }}/pom.xml
+          format: SARIF
+          args: --failOnCVSS 7
+      - if: inputs.language == 'java'
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: reports/dependency-check-report.sarif
+          category: dependency-check-${{ inputs.service }}
+
+      # --- Every language ------------------------------------------------
+      - name: Trivy filesystem scan (dependencies)
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          scan-type: fs
+          scan-ref: ${{ inputs.working-directory }}
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          format: sarif
+          output: trivy-fs-${{ inputs.service }}.sarif
+
+      - name: Upload Trivy fs results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-fs-${{ inputs.service }}.sarif
+          category: trivy-fs-${{ inputs.service }}

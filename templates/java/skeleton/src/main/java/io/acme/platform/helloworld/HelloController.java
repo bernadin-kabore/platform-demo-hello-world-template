@@ -20,7 +20,7 @@ public class HelloController {
     }
 
     // Hand-rolled rather than pointed at Spring Actuator's /actuator/health,
-    // so the shared Helm chart (common/chart) can use the exact same
+    // so the platform's shared Helm chart can use the exact same
     // /healthz, /readyz probe paths across every language. There is no
     // /metrics endpoint any more - metrics are pushed over OTLP by the
     // OpenTelemetry Java agent.

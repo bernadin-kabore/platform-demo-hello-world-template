@@ -1,0 +1,20 @@
+# Environment-wide desired state for staging.
+#
+# Advanced only by a promotion pull request from dev. An image cannot arrive here by being pushed to ECR.
+#
+# What belongs here: anything true of every service in this environment —
+# capacity, the telemetry environment name, the hostname suffix. What does not:
+# image references, which are per service and live in services/.
+otel:
+  environment: staging
+  serviceNamespace: "${{ values.owner }}"
+
+owner: "${{ values.owner }}"
+
+replicaCount: 2
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 8
+  targetCPUUtilizationPercentage: 70
