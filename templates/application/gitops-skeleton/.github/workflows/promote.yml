@@ -1,0 +1,142 @@
+name: promote
+
+# Move an image that is already running in one environment into the next one.
+#
+# This is the whole promotion model, and the important thing about it is what
+# it cannot do. It cannot pull a tag from ECR, cannot take a tag as free text,
+# and cannot invent one. It copies an image reference that is *already the
+# desired state of a lower environment* into a higher one, and it does so by
+# opening a pull request. An image reaches production because a human merged
+# it into dev, then merged it into staging, then merged it into production —
+# never because it exists in the registry.
+#
+# Run it from the Actions tab, or with:
+#   gh workflow run promote.yml -f from=dev -f to=staging -f services=auth,payments
+
+on:
+  workflow_dispatch:
+    inputs:
+      from:
+        description: Environment to promote from
+        type: choice
+        options: [dev, staging]
+        required: true
+      to:
+        description: Environment to promote into
+        type: choice
+        options: [staging, prod]
+        required: true
+      services:
+        description: Comma-separated service names, or "all"
+        type: string
+        default: all
+        required: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Refuse a promotion that skips or reverses an environment
+        run: |
+          set -euo pipefail
+          case "${{ inputs.from }}->${{ inputs.to }}" in
+            dev->staging|staging->prod) ;;
+            *)
+              echo "::error::${{ inputs.from }} -> ${{ inputs.to }} is not a promotion. The ladder is dev -> staging -> prod, one rung at a time."
+              exit 1
+              ;;
+          esac
+
+      - name: Copy the image references forward
+        id: copy
+        run: |
+          set -euo pipefail
+          from="${{ inputs.from }}"
+          to="${{ inputs.to }}"
+          requested="${{ inputs.services }}"
+          summary=""
+          promoted=""
+
+          shopt -s nullglob
+          for source in environments/"$from"/services/*.yaml; do
+            service=$(basename "$source" .yaml)
+            if [ "$requested" != "all" ] && ! echo ",$requested," | grep -q ",$service,"; then
+              continue
+            fi
+
+            target="environments/${to}/services/${service}.yaml"
+            if [ ! -f "$target" ]; then
+              echo "::error::${service} has no desired state in ${to}. Add ${target} first — promotion moves an image, it does not create a deployment."
+              exit 1
+            fi
+
+            tag=$(yq -r '.image.tag' "$source")
+            digest=$(yq -r '.image.digest' "$source")
+            current=$(yq -r '.image.tag' "$target")
+
+            if [ "$tag" = "$current" ]; then
+              echo "${service}: ${to} is already on ${tag}."
+              continue
+            fi
+
+            yq -i ".image.tag = \"${tag}\" | .image.digest = \"${digest}\"" "$target"
+            promoted="${promoted}${service} "
+            summary="${summary}| \`${service}\` | \`${current}\` | \`${tag}\` | \`${digest}\` |
+          "
+          done
+
+          if [ -z "$promoted" ]; then
+            echo "Nothing to promote."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "services=${promoted% }" >> "$GITHUB_OUTPUT"
+          {
+            echo 'table<<TABLE'
+            printf '%s' "$summary"
+            echo
+            echo 'TABLE'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Open the promotion pull request
+        if: steps.copy.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          branch="promote/${{ inputs.from }}-to-${{ inputs.to }}/${{ github.run_id }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          git add environments/
+          git commit -m "promote(${{ inputs.to }}): ${{ steps.copy.outputs.services }} from ${{ inputs.from }}"
+          git push origin "$branch"
+
+          cat > /tmp/pr-body.md <<BODY
+          Promoting from \`${{ inputs.from }}\` into \`${{ inputs.to }}\`.
+
+          Every image below is already the desired state of \`${{ inputs.from }}\`,
+          which means it was built from a reviewed commit, scanned before it
+          reached ECR, signed, and has an SBOM attested to it. This pull request
+          moves the same digest forward; it does not build or publish anything.
+
+          | Service | ${{ inputs.to }} was | ${{ inputs.to }} becomes | Digest |
+          |---|---|---|---|
+          ${{ steps.copy.outputs.table }}
+
+          Requested by @${{ github.actor }} via the promote workflow.
+          BODY
+
+          gh pr create \
+            --base main \
+            --head "$branch" \
+            --title "promote(${{ inputs.to }}): ${{ steps.copy.outputs.services }}" \
+            --body-file /tmp/pr-body.md

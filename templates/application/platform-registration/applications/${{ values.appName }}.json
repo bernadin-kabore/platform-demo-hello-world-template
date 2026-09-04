@@ -1,0 +1,5 @@
+{
+  "application": "${{ values.appName }}",
+  "gitopsRepoURL": "${{ values.gitopsRepoUrl }}",
+  "owner": "${{ values.owner }}"
+}

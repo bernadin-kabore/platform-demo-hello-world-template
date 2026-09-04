@@ -1,0 +1,23 @@
+# The GitOps repository as a catalog entity in its own right.
+#
+# It is a Resource rather than a Component because nobody builds or ships it —
+# it is the place the application's deployment state lives. Registering it
+# means the relationship "this application deploys from that repository" is a
+# catalog fact rather than a naming convention, which is what lets Ask the
+# Platform resolve where a deployment change belongs without guessing.
+apiVersion: backstage.io/v1alpha1
+kind: Resource
+metadata:
+  name: ${{ values.gitopsRepoName }}
+  description: Deployment state for every service in ${{ values.appName }}, across dev, staging and production
+  annotations:
+    github.com/project-slug: ${{ values.destination.owner }}/${{ values.gitopsRepoName }}
+    platform.acme.io/application: ${{ values.appName }}
+  links:
+    - url: https://github.com/${{ values.destination.owner }}/${{ values.destination.repo }}
+      title: Application source
+      icon: github
+spec:
+  type: gitops-repo
+  owner: ${{ values.owner }}
+  system: ${{ values.appName }}

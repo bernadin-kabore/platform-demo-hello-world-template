@@ -1,0 +1,101 @@
+# Platform defaults for every service in every environment.
+#
+# These are the values nobody has to think about. An environment overrides what
+# is genuinely environment-shaped (replica counts, the OTel environment name,
+# the hostname suffix) in environments/<env>/env-values.yaml, and a service
+# overrides what is genuinely service-shaped (its image, its resources) in
+# environments/<env>/services/<service>.yaml. ArgoCD layers the three in that
+# order, so the narrowest file always wins.
+#
+# Nothing in this file is written by CI. CI touches exactly two keys —
+# image.tag and image.digest — and only in a per-service environment file.
+
+# Set per service; the chart is generic and has no name of its own.
+nameOverride: ""
+
+image:
+  # Set per service. The repository is <ecr-registry>/<application>-<service>,
+  # which is also what Terraform creates and what the CI role is allowed to
+  # push to.
+  repository: ""
+  tag: "0.1.0"
+  # Recorded alongside the tag so the deployed artifact is identifiable even if
+  # a tag were ever reused. ECR is configured IMMUTABLE so it cannot be, and
+  # Kyverno's verifyImages re-resolves by digest regardless — this is the
+  # audit trail, not the enforcement.
+  digest: ""
+
+replicaCount: 2
+
+owner: ""
+
+provisionS3Bucket: false
+
+# Platform-owned telemetry configuration. Applications depend on the
+# OpenTelemetry contract only — never on Prometheus, Tempo, Kafka or the log
+# store directly — so these backends can be replaced without touching any
+# service. See platform-demo-gitops/docs/observability/README.md.
+otel:
+  # The collector gateway Service. Note the release name is
+  # "otel-collector-gateway", not "otel-collector".
+  endpoint: "http://otel-collector-gateway.observability.svc.cluster.local:4317"
+  protocol: grpc
+  environment: dev
+  # service.namespace groups related services by team or domain. Defaults to
+  # the owning team when unset.
+  serviceNamespace: ""
+
+resources:
+  requests: { cpu: 50m, memory: 64Mi }
+  limits: { memory: 128Mi }
+
+service:
+  port: 8080
+
+istio:
+  gatewayHost: ""
+
+rollout:
+  canary:
+    steps:
+      - setWeight: 20
+      - pause: { duration: 60 }
+      - analysis:
+          templates:
+            - templateName: istio-success-rate
+              clusterScope: true
+          args:
+            # Rendered with `tpl`, so the analysis run always targets the
+            # service and namespace this release actually deployed rather than
+            # a name copied in at scaffold time.
+            - name: service-name
+              value: '{{ include "app.name" . }}'
+            - name: namespace
+              value: "{{ .Release.Namespace }}"
+      - setWeight: 50
+      - pause: { duration: 60 }
+      - setWeight: 100
+
+# Alerting rules that belong to this service alone, rendered by
+# templates/prometheusrule.yaml. Declared per service in its environment values
+# file, not here — this default exists so a service that declares none renders
+# no PrometheusRule at all. A rule every service should have belongs in
+# platform-demo-gitops instead, keyed by label.
+prometheusRules: []
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 6
+  targetCPUUtilizationPercentage: 70
+
+namespacePolicy:
+  quota:
+    requestsCpu: "4"
+    requestsMemory: 8Gi
+    limitsMemory: 16Gi
+    pods: "50"
+  defaults:
+    requestCpu: 50m
+    requestMemory: 64Mi
+    limitMemory: 256Mi

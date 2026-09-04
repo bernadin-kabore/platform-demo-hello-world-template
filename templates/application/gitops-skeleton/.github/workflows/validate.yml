@@ -1,0 +1,100 @@
+name: validate
+
+# What stands between a pull request in this repository and the cluster.
+#
+# ArgoCD syncs this repository's default branch automatically, so a merge here
+# IS a deployment. That makes these checks the last gate — after them there is
+# only Kyverno at admission, and Kyverno can only refuse a pod, not tell you
+# your values file was malformed.
+#
+# Deliberately not here: image vulnerability scanning, SBOM generation,
+# signing. All of that happened in the source repository's pipeline before the
+# image was published, and re-doing it against an already-published digest
+# would prove nothing new. What this checks is that the desired state in this
+# repository is renderable, complete, and points at artifacts the platform
+# actually produced.
+
+on:
+  pull_request:
+    branches: [main, develop, "release/**"]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.15.4
+
+      - name: Every service in every environment renders
+        run: |
+          set -euo pipefail
+          failed=0
+          shopt -s nullglob
+          for values in environments/*/services/*.yaml; do
+            env_name=$(basename "$(dirname "$(dirname "$values")")")
+            service=$(basename "$values" .yaml)
+            echo "::group::${env_name}/${service}"
+            if ! helm template "${service}" chart \
+                  --namespace "${env_name}" \
+                  --values "environments/${env_name}/env-values.yaml" \
+                  --values "$values" > /dev/null; then
+              echo "::error file=${values}::helm template failed for ${service} in ${env_name}"
+              failed=1
+            fi
+            echo "::endgroup::"
+          done
+          if [ "$failed" != "0" ]; then exit 1; fi
+
+      - name: Image references are immutable and complete
+        run: |
+          set -euo pipefail
+          failed=0
+          shopt -s nullglob
+          for values in environments/*/services/*.yaml; do
+            repository=$(yq -r '.image.repository // ""' "$values")
+            tag=$(yq -r '.image.tag // ""' "$values")
+
+            if [ -z "$repository" ]; then
+              echo "::error file=${values}::image.repository is empty."
+              failed=1
+            fi
+            case "$repository" in
+              *.dkr.ecr.*.amazonaws.com/*) ;;
+              "") ;;
+              *)
+                # Mirrors Kyverno's restrict-image-registries, which would
+                # refuse the pod anyway — better to fail the pull request than
+                # to merge something that can never start.
+                echo "::error file=${values}::${repository} is not an ECR repository."
+                failed=1
+                ;;
+            esac
+            if [ -z "$tag" ] || [ "$tag" = "latest" ]; then
+              echo "::error file=${values}::image.tag must be an immutable tag, never empty and never 'latest'."
+              failed=1
+            fi
+          done
+          if [ "$failed" != "0" ]; then exit 1; fi
+
+      - name: The ApplicationSet is valid YAML and targets this repository
+        run: |
+          set -euo pipefail
+          yq -e '.kind == "ApplicationSet"' argocd/applicationset.yaml > /dev/null
+          project=$(yq -r '.spec.template.spec.project' argocd/applicationset.yaml)
+          if [ "$project" != "workloads" ]; then
+            # The workloads AppProject is what limits these Applications to the
+            # resource kinds a developer workload may create. Pointing them at
+            # a more privileged project is the one edit in this repository that
+            # would widen the platform's blast radius, so it fails here rather
+            # than being noticed later.
+            echo "::error file=argocd/applicationset.yaml::Generated Applications must run under the 'workloads' project, not '${project}'."
+            exit 1
+          fi
