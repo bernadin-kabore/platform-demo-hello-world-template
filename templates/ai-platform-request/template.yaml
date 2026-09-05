@@ -1,0 +1,138 @@
+# Unlike its four siblings, this template scaffolds nothing. It is a form that
+# collects a sentence of intent and hands it to the AI Platform Agent, which
+# classifies the request, reads the repositories it is authorized for, proposes
+# changes, evaluates them, and opens pull requests if they are good enough.
+#
+# It lives in this repository rather than in platform-demo-backstage for the
+# same reason the language templates do: templates are registered from this
+# repo's root catalog-info.yaml, so adding one is a directory plus one line
+# there and no change on the portal side.
+#
+# The service field is the important one, and it is not a hint. Selecting a
+# service is how a developer authorizes the agent to touch that service's
+# repository — the entity picked here is resolved through the software catalog
+# to a repository and an owner, and that resolution is the whole authorization
+# boundary for the run. Leaving it blank is a different request, not a vaguer
+# one: no application repository is in scope at all, and only platform-wide
+# changes can result.
+apiVersion: scaffolder.backstage.io/v1beta3
+kind: Template
+metadata:
+  name: ai-platform-request
+  title: Ask the Platform
+  description: >-
+    Stuck on something the golden path does not cover? Describe it in your own
+    words. Pick your service and the platform can propose a fix in your own
+    repository; leave it blank to ask for something platform-wide. Either way you
+    get a reviewed pull request, never a deployment — the agent cannot merge
+    anything.
+  tags: [ai, platform, request]
+spec:
+  owner: platform-team
+  type: platform-request
+
+  parameters:
+    - title: What do you need?
+      required: [intent, owner]
+      properties:
+        intent:
+          title: Describe it in your own words
+          type: string
+          description: >-
+            A sentence or two is enough. Say what you want to be true, not how
+            to build it — working out how is the agent's job, and telling it
+            how usually makes the answer worse. Describing a symptom is fine;
+            you do not need to know the cause.
+          ui:widget: textarea
+          ui:options:
+            rows: 6
+          ui:autofocus: true
+          ui:placeholder: >-
+            Our pods keep getting OOMKilled whenever traffic spikes, and we are
+            not sure whether that is a memory limit or a leak.
+        owner:
+          title: Requesting team
+          type: string
+          description: >-
+            The team this request is made as. It has to own the service selected
+            below — the agent checks that against the catalog and refuses
+            otherwise.
+          ui:field: OwnerPicker
+          ui:options:
+            catalogFilter:
+              kind: Group
+
+    - title: Which service?
+      properties:
+        service:
+          title: The service this is about
+          type: string
+          description: >-
+            Select a service your team owns and the agent is authorized to
+            propose changes in that service's repository — its Helm values,
+            its resources, its probes. Leave it blank only for a genuinely
+            platform-wide request ("every service should…"), which produces
+            changes in the platform repositories instead. It cannot reach any
+            other team's service either way.
+          ui:field: EntityPicker
+          ui:options:
+            catalogFilter:
+              kind: Component
+            allowArbitraryValues: false
+        waitSeconds:
+          title: How long to wait before handing back
+          type: integer
+          default: 600
+          minimum: 60
+          maximum: 1800
+          description: >-
+            A run takes minutes — the agent classifies the request, reads the
+            repositories, and evaluates what it produced. If it is still going
+            when this expires you get the request id and the run finishes in the
+            cluster regardless.
+
+  steps:
+    - id: ai-request
+      name: Ask the AI Platform Agent
+      action: platform:ai:request
+      input:
+        intent: ${{ parameters.intent }}
+        requester: ${{ parameters.owner }}
+        service: ${{ parameters.service }}
+        waitSeconds: ${{ parameters.waitSeconds }}
+
+  # Deliberately no publish:github, no catalog:register, no GitOps PR step.
+  # This template creates nothing and registers nothing — the only artifact of
+  # a run is a set of pull requests the agent opened, each of which still has
+  # to survive CI, policy scanning, terraform plan and an approving human
+  # review before it changes anything at all.
+  output:
+    text:
+      - title: What the platform understood
+        content: |
+          Request `${{ steps['ai-request'].output.requestId }}` — status
+          **${{ steps['ai-request'].output.status }}**.
+
+          > ${{ steps['ai-request'].output.interpretedRequest }}
+
+          Scope: **${{ steps['ai-request'].output.ownershipScope }}**. Worked on
+          by: ${{ steps['ai-request'].output.specialists }}.
+
+          The agent decides who works on a request before it reads a single
+          file, so if the interpretation above is wrong, nothing was built on
+          top of the misunderstanding — rephrase and ask again.
+      - title: What happens next
+        content: |
+          The pull requests below are labelled `ai-generated` and
+          `needs-human-approval`. Each carries the execution plan, the agent's
+          reasoning, the files it changed and why, anything it could not decide
+          for itself, anything it was refused, and its full evaluation report.
+
+          Nothing has been merged and nothing has been deployed. These changes
+          travel the same path as a hand-written one: CI, security scanning,
+          policy checks, `terraform plan` where it applies, and an approving
+          review from a person. The agent holds no bypass on any of it.
+    links:
+      - title: Generated pull requests
+        url: https://github.com/pulls?q=is%3Apr+is%3Aopen+label%3Aai-generated
+        icon: github

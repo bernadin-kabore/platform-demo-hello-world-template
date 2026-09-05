@@ -21,9 +21,9 @@ public class HelloController {
 
     // Hand-rolled rather than pointed at Spring Actuator's /actuator/health,
     // so the shared Helm chart (common/chart) can use the exact same
-    // /healthz, /readyz probe paths across every language — /metrics is the
-    // one endpoint left to Actuator (see application.yml), since Micrometer
-    // already speaks Prometheus natively.
+    // /healthz, /readyz probe paths across every language. There is no
+    // /metrics endpoint any more - metrics are pushed over OTLP by the
+    // OpenTelemetry Java agent.
     @GetMapping("/healthz")
     public String healthz() {
         return "ok";

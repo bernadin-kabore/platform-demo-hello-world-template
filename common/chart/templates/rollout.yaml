@@ -33,9 +33,21 @@ spec:
           ports:
             - containerPort: 8080
               name: http
+          # OTel configuration is injected here, not baked into the image, so
+          # the same immutable artifact can be promoted across environments.
+          # OTEL_RESOURCE_ATTRIBUTES carries the attributes the SDK cannot
+          # discover on its own; everything Kubernetes-derived (namespace, pod,
+          # node, deployment) is added by the collector's k8sattributes
+          # processor instead of being duplicated here.
           env:
             - name: OTEL_SERVICE_NAME
               value: {{ include "app.name" . }}
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ .Values.otel.endpoint | quote }}
+            - name: OTEL_EXPORTER_OTLP_PROTOCOL
+              value: {{ .Values.otel.protocol | quote }}
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: "deployment.environment.name={{ .Values.otel.environment }},service.namespace={{ .Values.otel.serviceNamespace | default .Values.owner }},service.version={{ .Values.image.tag }}"
             - name: APP_VERSION
               value: {{ .Values.image.tag | quote }}
           resources:

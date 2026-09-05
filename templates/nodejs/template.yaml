@@ -5,7 +5,7 @@ metadata:
   title: Node.js Service
   description: >-
     Scaffold a Node.js (Express) "hello world" HTTP service with
-    observability (Prometheus metrics, OTel traces/logs), Istio, progressive
+    observability (OTLP metrics, traces and trace-correlated JSON logs), Istio, progressive
     delivery via Argo Rollouts, and a full security-gated CI/CD pipeline
     already wired in. You write business logic; the platform provides
     everything else.

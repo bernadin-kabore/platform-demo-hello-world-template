@@ -5,11 +5,13 @@ spring:
 app:
   version: ${APP_VERSION:dev}
 
+# Actuator's Prometheus endpoint is deliberately not exposed. Metrics leave
+# over OTLP via the OpenTelemetry Java agent, so the application depends on
+# OpenTelemetry alone and the platform can change metrics backends without
+# touching any service. Liveness/readiness are served by HelloController at
+# /healthz and /readyz so probe paths are identical across all four languages.
 management:
   endpoints:
     web:
       exposure:
-        include: prometheus
-      base-path: /
-      path-mapping:
-        prometheus: metrics
+        include: "none"
