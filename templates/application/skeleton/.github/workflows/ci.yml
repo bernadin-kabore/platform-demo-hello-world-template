@@ -1,0 +1,396 @@
+name: ci
+
+# The application pipeline. One repository, N services, possibly N languages —
+# and on any given commit, usually only one or two of them actually changed.
+#
+# How it fits together:
+#
+#   detect-changes   reads platform.yaml, diffs the commit, decides which
+#                    services are affected
+#         |
+#         +-- validate  (one parallel job set per affected service)
+#         +-- coverage  (one per affected service, 70% line coverage gate)
+#         +-- semgrep   (once, whole repository)
+#         +-- gitleaks  (once, whole repository)
+#         |
+#      build            (one per affected service: build, scan, push, SBOM,
+#         |              sign, attest — see service-build.yml)
+#         |
+#      gitops-pr        (once: ONE pull request against the application's
+#                        GitOps repository carrying every image bump)
+#         |
+#      ci-gate          (the single required status check)
+#
+# Nothing here talks to Kubernetes. The only thing this pipeline can do to a
+# running cluster is open a pull request that a human merges.
+#
+# This file is NOT rendered by the scaffolder — it is copied verbatim. The
+# service list lives in platform.yaml, so adding a service later is a manifest
+# edit plus a directory, and never a change to this workflow.
+
+on:
+  pull_request:
+    # Gated branches. `ci-gate` below is the required status check on all
+    # three (see platform-demo-terraform-modules/envs/github-repos), so a PR
+    # targeting any of them cannot merge unless every affected service passed.
+    branches: [main, develop, "release/**"]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read # deployment state lives in another repository now; CI never writes this one
+  id-token: write # OIDC federation to AWS + Sigstore keyless signing, no static secrets
+  security-events: write # upload SAST/scan results as code-scanning alerts
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: false # never cancel a run that may already have pushed an image
+
+jobs:
+  # ---------------------------------------------------------------------
+  # 1. Which services does this commit actually affect?
+  #
+  #    Deliberately path-based rather than dependency-graph-based. A real
+  #    cross-language dependency engine would be the least reliable component
+  #    in the platform, and getting it wrong means shipping a stale image and
+  #    believing you deployed. Instead: a change under services/<name>/
+  #    affects that service, and a change to anything shared affects all of
+  #    them. Over-building is a wasted runner; under-building is an incident.
+  # ---------------------------------------------------------------------
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      services: ${{ steps.affected.outputs.services }}
+      count: ${{ steps.affected.outputs.count }}
+      names: ${{ steps.affected.outputs.names }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the diff below needs history, not just the tip
+
+      - name: Work out the changed paths
+        id: diff
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            # fetch-depth: 0 above means the base branch is already local.
+            base="origin/${{ github.base_ref }}"
+            changed=$(git diff --name-only "$(git merge-base "$base" HEAD)" HEAD)
+          elif git rev-parse --verify --quiet "${{ github.event.before }}^{commit}" >/dev/null; then
+            changed=$(git diff --name-only "${{ github.event.before }}" "${{ github.sha }}")
+          else
+            # First push to a new branch, a force push, or a squash that
+            # orphaned the previous tip. Nothing reliable to diff against, so
+            # every service is treated as affected rather than guessing.
+            changed="__ALL__"
+          fi
+          printf '%s\n' "$changed" > changed-paths.txt
+          echo "Changed paths:"
+          cat changed-paths.txt
+
+      - name: Select affected services
+        id: affected
+        run: |
+          set -euo pipefail
+          # yq rather than PyYAML: yq ships on the GitHub-hosted runner image,
+          # a third-party Python package would have to be installed first.
+          yq -o=json '.' platform.yaml > platform.json
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os, sys, fnmatch
+
+          manifest = json.load(open("platform.json"))
+          services = manifest["services"]
+          shared = manifest.get("sharedPaths", [])
+          registry = os.environ["ECR_REGISTRY"]
+          app = manifest["application"]
+
+          changed = [p for p in open("changed-paths.txt").read().splitlines() if p]
+          rebuild_all = changed == ["__ALL__"] or any(
+              fnmatch.fnmatch(p, pattern) for p in changed for pattern in shared
+          )
+
+          affected = []
+          for svc in services:
+              name = svc["name"]
+              directory = f"services/{name}"
+              touched = rebuild_all or any(p.startswith(directory + "/") for p in changed)
+              if touched:
+                  affected.append(
+                      {
+                          "name": name,
+                          "language": svc["language"],
+                          "directory": directory,
+                          "ecr": f"{registry}/{app}-{name}",
+                      }
+                  )
+
+          print(f"services={json.dumps(affected)}")
+          print(f"count={len(affected)}")
+          print("names=" + ",".join(s["name"] for s in affected))
+          print(
+              f"Rebuilding all: {rebuild_all}. Affected: "
+              f"{[s['name'] for s in affected] or 'none'}",
+              file=sys.stderr,
+          )
+          PY
+        env:
+          ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
+
+  # ---------------------------------------------------------------------
+  # 2. Per-service validation: lint, tests, CodeQL, per-language SAST, SCA.
+  #    The reusable workflow lives in the platform template repository so all
+  #    applications share one definition of what "validated" means.
+  # ---------------------------------------------------------------------
+  validate:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.count != '0'
+    strategy:
+      fail-fast: false # one service's failure must not hide another's
+      matrix:
+        service: ${{ fromJSON(needs.detect-changes.outputs.services) }}
+    uses: bernadin-kabore/platform-demo-hello-world-template/.github/workflows/service-validate.yml@main
+    with:
+      service: ${{ matrix.service.name }}
+      language: ${{ matrix.service.language }}
+      working-directory: ${{ matrix.service.directory }}
+
+  # ---------------------------------------------------------------------
+  # 3. Coverage, per affected service. Unchanged from the single-service
+  #    platform except that it is now told which directory to look in — an
+  #    input this reusable workflow already accepted.
+  # ---------------------------------------------------------------------
+  coverage:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.count != '0'
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJSON(needs.detect-changes.outputs.services) }}
+    uses: bernadin-kabore/platform-demo-hello-world-template/.github/workflows/code-coverage.yml@main
+    with:
+      language: ${{ matrix.service.language }}
+      coverage-threshold: 70
+      working-directory: ${{ matrix.service.directory }}
+
+  # ---------------------------------------------------------------------
+  # 4. Repository-wide security scanning. Both of these read the whole tree —
+  #    gitleaks reads git history — so they run once rather than once per
+  #    service. Same tools and same blocking behaviour as before.
+  # ---------------------------------------------------------------------
+  semgrep:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Semgrep
+        uses: semgrep/semgrep-action@v1
+        with:
+          config: p/owasp-top-ten
+        env:
+          SEMGREP_RULES: p/owasp-top-ten
+
+  gitleaks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Gitleaks (secrets scan)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ---------------------------------------------------------------------
+  # 5. Build, scan, push, SBOM, sign, attest — one image per affected
+  #    service, in parallel, and only for pushes to main. Pull requests stop
+  #    at the gates above and publish nothing.
+  # ---------------------------------------------------------------------
+  build:
+    needs: [detect-changes, validate, coverage, semgrep, gitleaks]
+    if: >-
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      needs.detect-changes.outputs.count != '0'
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJSON(needs.detect-changes.outputs.services) }}
+    uses: bernadin-kabore/platform-demo-hello-world-template/.github/workflows/service-build.yml@main
+    with:
+      service: ${{ matrix.service.name }}
+      working-directory: ${{ matrix.service.directory }}
+      ecr-repository: ${{ matrix.service.ecr }}
+      aws-region: ${{ vars.AWS_REGION }}
+      image-tag: ${{ github.sha }}
+    secrets:
+      aws-role-arn: ${{ secrets.AWS_CI_ROLE_ARN }}
+
+  # ---------------------------------------------------------------------
+  # 6. ONE pull request against the application's GitOps repository,
+  #    carrying every image this run published.
+  #
+  #    This is the only way deployment state changes. There is no kubectl
+  #    here, no helm, no cluster credential — and, unlike the platform this
+  #    replaces, no direct push either. A human merges, ArgoCD reconciles.
+  # ---------------------------------------------------------------------
+  gitops-pr:
+    needs: [detect-changes, build]
+    if: >-
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      needs.detect-changes.outputs.count != '0'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Read the application manifest
+        uses: actions/checkout@v4
+
+      - id: manifest
+        run: |
+          set -euo pipefail
+          echo "gitops_repo=$(yq -r '.gitopsRepository' platform.yaml)" >> "$GITHUB_OUTPUT"
+          echo "application=$(yq -r '.application' platform.yaml)" >> "$GITHUB_OUTPUT"
+          echo "auto_env=$(yq -r '.autoDeployEnvironment' platform.yaml)" >> "$GITHUB_OUTPUT"
+
+      # Short-lived App installation token rather than a long-lived PAT. The
+      # deploy bot is installed on the GitOps repository so it can open a pull
+      # request there; it has no bypass on that repository's rulesets, which is
+      # the difference between this and the model it replaces.
+      - name: Mint platform-deploy-bot installation token
+        id: deploy-bot-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.PLATFORM_DEPLOY_BOT_APP_ID }}
+          private-key: ${{ secrets.PLATFORM_DEPLOY_BOT_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ steps.manifest.outputs.gitops_repo }}
+
+      - name: Check out the GitOps repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/${{ steps.manifest.outputs.gitops_repo }}
+          token: ${{ steps.deploy-bot-token.outputs.token }}
+          path: gitops
+
+      - name: Collect the image references this run published
+        uses: actions/download-artifact@v4
+        with:
+          pattern: image-ref-*
+          path: image-refs
+          merge-multiple: true
+
+      - name: Apply the image bumps
+        id: bump
+        run: |
+          set -euo pipefail
+          env_dir="gitops/environments/${{ steps.manifest.outputs.auto_env }}/services"
+          summary=""
+          for ref in image-refs/*.json; do
+            service=$(jq -r '.service' "$ref")
+            tag=$(jq -r '.tag' "$ref")
+            digest=$(jq -r '.digest' "$ref")
+            file="${env_dir}/${service}.yaml"
+
+            if [ ! -f "$file" ]; then
+              echo "::error::${file} does not exist in the GitOps repository. A service was built that has no deployment state — add it to the GitOps repository first."
+              exit 1
+            fi
+
+            previous_tag=$(yq -r '.image.tag' "$file")
+            previous_digest=$(yq -r '.image.digest' "$file")
+
+            # Only the image reference. Everything else in this file —
+            # replicas, resources, probes, canary steps — belongs to whoever
+            # owns the environment, and CI has no opinion about it.
+            yq -i ".image.tag = \"${tag}\" | .image.digest = \"${digest}\"" "$file"
+
+            summary="${summary}| \`${service}\` | \`${previous_tag}\` | \`${tag}\` | \`${digest}\` |
+          "
+            echo "Bumped ${service}: ${previous_tag} (${previous_digest}) -> ${tag} (${digest})"
+          done
+          {
+            echo 'table<<TABLE'
+            printf '%s' "$summary"
+            echo
+            echo 'TABLE'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Open one pull request for the whole build
+        working-directory: gitops
+        env:
+          GH_TOKEN: ${{ steps.deploy-bot-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          branch="deploy/${{ steps.manifest.outputs.auto_env }}/${{ github.sha }}"
+          git config user.name "platform-deploy-bot[bot]"
+          git config user.email "platform-deploy-bot[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+
+          if git diff --quiet; then
+            echo "No image reference changed — nothing to open a pull request for."
+            exit 0
+          fi
+
+          git add environments/
+          git commit -m "deploy(${{ steps.manifest.outputs.auto_env }}): ${{ needs.detect-changes.outputs.names }} at ${{ github.sha }}"
+          git push origin "$branch"
+
+          cat > /tmp/pr-body.md <<BODY
+          Automated by the \`${{ github.repository }}\` CI pipeline. Merging this
+          pull request is what deploys — ArgoCD reconciles
+          \`environments/${{ steps.manifest.outputs.auto_env }}\` from this
+          repository's default branch and nothing else.
+
+          | Source | |
+          |---|---|
+          | Repository | \`${{ github.repository }}\` |
+          | Commit | ${{ github.sha }} |
+          | Environment | \`${{ steps.manifest.outputs.auto_env }}\` |
+          | Affected services | ${{ needs.detect-changes.outputs.names }} |
+          | CI run | ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }} |
+
+          | Service | Previous tag | New tag | New digest |
+          |---|---|---|---|
+          ${{ steps.bump.outputs.table }}
+
+          Every image above was built from that commit, scanned by Trivy before
+          it reached ECR, has an SPDX SBOM attested to it, and is signed
+          keylessly by the platform's \`service-build.yml\`. Kyverno re-verifies
+          the signature and the attestation at admission — if any of that is
+          missing the pod is refused whether or not this merges.
+          BODY
+
+          gh pr create \
+            --base main \
+            --head "$branch" \
+            --title "deploy(${{ steps.manifest.outputs.auto_env }}): ${{ needs.detect-changes.outputs.names }}" \
+            --body-file /tmp/pr-body.md
+
+  # ---------------------------------------------------------------------
+  # 7. The one required status check.
+  #
+  #    Branch protection cannot name a matrix job: the job names contain the
+  #    service names, which are not known when the ruleset is written. So one
+  #    job fans everything in and reports a single context. A skipped job is
+  #    an acceptable outcome (nothing affected, or a pull request that never
+  #    reaches the build stage); a failed or cancelled one is not.
+  # ---------------------------------------------------------------------
+  ci-gate:
+    if: always()
+    needs: [detect-changes, validate, coverage, semgrep, gitleaks, build, gitops-pr]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail if any stage did not succeed
+        run: |
+          set -euo pipefail
+          results='${{ toJSON(needs) }}'
+          echo "$results" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          failed=$(echo "$results" | jq -r '
+            to_entries
+            | map(select(.value.result != "success" and .value.result != "skipped"))
+            | map(.key)
+            | join(", ")
+          ')
+          if [ -n "$failed" ]; then
+            echo "::error::These stages did not pass: ${failed}"
+            exit 1
+          fi
+          echo "Every stage that ran passed."

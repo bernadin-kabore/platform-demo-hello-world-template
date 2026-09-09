@@ -1,0 +1,39 @@
+# The application manifest — the one file that says what this repository
+# contains and where its deployment state lives.
+#
+# CI reads it on every commit to work out which services a change affects and
+# which GitOps repository to open a pull request against. Nothing else in
+# .github/ is generated or application-specific, so adding a fifth service
+# later is: create services/<name>/, add three lines here, and add the matching
+# deployment state to the GitOps repository. The pipeline picks it up with no
+# workflow change at all.
+#
+# Editing this file affects every service (it is listed under sharedPaths), so
+# a change here deliberately rebuilds all of them.
+
+application: ${{ values.appName }}
+description: ${{ values.description }}
+owner: ${{ values.owner }}
+
+# Deployment state for every service in this application. CI opens its pull
+# requests here and never writes to this repository.
+gitopsRepository: ${{ values.gitopsRepoName }}
+
+# The only environment a successful build advances automatically. Staging and
+# production move by promotion pull request in the GitOps repository, so an
+# image cannot reach them merely by existing in ECR.
+autoDeployEnvironment: dev
+
+# A change to any of these rebuilds every service, because nothing here can be
+# attributed to one of them. Correctness over cleverness: over-building costs a
+# runner, under-building ships a stale image while reporting success.
+sharedPaths:
+  - platform.yaml
+  - .github/workflows/*
+  - shared/*
+
+services:
+{%- for service in values.services %}
+  - name: ${{ service.name }}
+    language: ${{ service.language }}
+{%- endfor %}

@@ -1,0 +1,29 @@
+{{- if .Values.prometheusRules }}
+# Alerting rules that ship with one service.
+#
+# When every service had its own copy of the chart, a team could add a template
+# here for a rule that only made sense for them. One shared chart per
+# application removes that option, so the capability comes back as a value: a
+# service declares its rules in its own environments/<env>/services/<name>.yaml
+# and the chart renders them. That keeps the rule versioned next to the rest of
+# that service's desired state, promoted through environments with everything
+# else, and — the reason it matters here — writable by a service-scoped request
+# without touching a file any sibling service renders.
+#
+# A rule that should apply to every service on the platform does not belong
+# here. It belongs in platform-demo-gitops as a cluster-wide rule keyed by
+# label, where it reaches services whose teams never thought to ask.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "app.name" . }}
+  labels:
+    {{- include "app.labels" . | nindent 4 }}
+    # kube-prometheus-stack only picks up rules carrying its release label.
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: {{ include "app.name" . }}
+      rules:
+        {{- tpl (toYaml .Values.prometheusRules) . | nindent 8 }}
+{{- end }}

@@ -1,0 +1,20 @@
+# Environment-wide desired state for dev.
+#
+# Advanced automatically by the application's CI pipeline. Every merge to the source repository's main branch opens a pull request here.
+#
+# What belongs here: anything true of every service in this environment —
+# capacity, the telemetry environment name, the hostname suffix. What does not:
+# image references, which are per service and live in services/.
+otel:
+  environment: dev
+  serviceNamespace: "${{ values.owner }}"
+
+owner: "${{ values.owner }}"
+
+replicaCount: 2
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 6
+  targetCPUUtilizationPercentage: 70
