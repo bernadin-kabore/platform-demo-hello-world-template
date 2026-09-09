@@ -22,6 +22,20 @@ on:
         description: Directory containing the service's source, relative to the repo root
         type: string
         default: "."
+      node-version:
+        description: Node major version for the nodejs path
+        type: string
+        default: "20"
+      nodejs-test-command:
+        description: >-
+          Command c8 wraps to produce coverage on the nodejs path. The default
+          matches the nodejs skeleton, which is plain JavaScript with flat
+          src/*.test.js files. A TypeScript caller overrides it -- the agent
+          passes a tsx invocation over src/**/*.test.ts -- rather than
+          reimplementing the threshold logic below for a fifth time, which is
+          the whole reason this workflow is reusable.
+        type: string
+        default: "node --test src/*.test.js"
 
 jobs:
   check:
@@ -35,11 +49,11 @@ jobs:
       # --- Node.js -------------------------------------------------------
       - if: inputs.language == 'nodejs'
         uses: actions/setup-node@v4
-        with: { node-version: "20", cache: "npm" }
+        with: { node-version: "${{ inputs.node-version }}", cache: "npm" }
       - if: inputs.language == 'nodejs'
         run: npm ci
       - if: inputs.language == 'nodejs'
-        run: npx c8 --reporter=json-summary --reporter=text node --test src/*.test.js
+        run: npx c8 --reporter=json-summary --reporter=text ${{ inputs.nodejs-test-command }}
       - if: inputs.language == 'nodejs'
         id: coverage-nodejs
         run: |
