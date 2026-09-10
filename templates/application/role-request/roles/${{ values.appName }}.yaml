@@ -1,0 +1,19 @@
+# Opened automatically by the New Application scaffolder template.
+#
+# One file, one AWS role, federated to ${{ values.appName }}-source on main.
+# Merging this pull request is what gives this application an identity it can
+# push images with; until then its pipeline skips the build and says so.
+#
+# Adding a service later means adding it here as well as to platform.yaml --
+# the grant enumerates repositories rather than matching a prefix, so a service
+# that is not listed has nowhere to push.
+github_owner: ${{ values.githubOwner }}
+github_repo: ${{ values.appName }}-source
+application: ${{ values.appName }}
+
+grants:
+  - bundle: ecr-push
+    services:
+{%- for service in values.services %}
+      - ${{ service.name }}
+{%- endfor %}

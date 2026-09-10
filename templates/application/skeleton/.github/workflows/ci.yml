@@ -36,6 +36,14 @@ on:
     branches: [main, develop, "release/**"]
   push:
     branches: [main]
+  repository_dispatch:
+    # Sent by platform-demo-role-vending once this application's AWS role has
+    # been vended and AWS_CI_ROLE_ARN written. A scaffolded repository fires
+    # its first pipeline before that role exists, so that run skips the build
+    # instead of failing; this is what tells it to try again. detect-changes
+    # has no commit to diff against on a dispatch and falls through to
+    # __ALL__, which rebuilds every service -- correct for a first build.
+    types: [platform-role-vended]
 
 permissions:
   contents: read # deployment state lives in another repository now; CI never writes this one
@@ -206,9 +214,15 @@ jobs:
   # ---------------------------------------------------------------------
   build:
     needs: [detect-changes, validate, coverage, semgrep, gitleaks]
+    # AWS_CI_ROLE_ARN is set by the role vending machine, which runs after a
+    # human merges the role request. Until then there is no role to assume, so
+    # this skips -- a skipped build is reported by ci-gate as acceptable, while
+    # a failed credential step would show a red pipeline on a repository whose
+    # owner has done nothing wrong.
     if: >-
-      github.event_name == 'push' &&
+      (github.event_name == 'push' || github.event_name == 'repository_dispatch') &&
       github.ref == 'refs/heads/main' &&
+      vars.AWS_CI_ROLE_ARN != '' &&
       needs.detect-changes.outputs.count != '0'
     strategy:
       fail-fast: false
@@ -222,7 +236,10 @@ jobs:
       aws-region: ${{ vars.AWS_REGION }}
       image-tag: ${{ github.sha }}
     secrets:
-      aws-role-arn: ${{ secrets.AWS_CI_ROLE_ARN }}
+      # A variable, not a secret: an ARN identifies a role, it does not grant
+      # access to it. Keeping it readable is also what allows the `if` above to
+      # test whether the role has been vended yet.
+      aws-role-arn: ${{ vars.AWS_CI_ROLE_ARN }}
 
   # ---------------------------------------------------------------------
   # 6. ONE pull request against the application's GitOps repository,
@@ -235,8 +252,9 @@ jobs:
   gitops-pr:
     needs: [detect-changes, build]
     if: >-
-      github.event_name == 'push' &&
+      (github.event_name == 'push' || github.event_name == 'repository_dispatch') &&
       github.ref == 'refs/heads/main' &&
+      vars.AWS_CI_ROLE_ARN != '' &&
       needs.detect-changes.outputs.count != '0'
     runs-on: ubuntu-latest
     steps:
@@ -363,6 +381,37 @@ jobs:
             --head "$branch" \
             --title "deploy(${{ steps.manifest.outputs.auto_env }}): ${{ needs.detect-changes.outputs.names }}" \
             --body-file /tmp/pr-body.md
+
+  # ---------------------------------------------------------------------
+  # 6b. Say so, loudly, when the build was skipped for want of a role.
+  #
+  #     ci-gate treats a skipped job as acceptable, which is right -- but it
+  #     means this pipeline goes green having published nothing. Without this
+  #     step the only way to tell that apart from a successful build is to
+  #     read the job list.
+  # ---------------------------------------------------------------------
+  awaiting-role:
+    needs: detect-changes
+    if: >-
+      (github.event_name == 'push' || github.event_name == 'repository_dispatch') &&
+      github.ref == 'refs/heads/main' &&
+      vars.AWS_CI_ROLE_ARN == ''
+    runs-on: ubuntu-latest
+    steps:
+      - name: Explain what is missing
+        run: |
+          {
+            echo "## No image was built"
+            echo
+            echo "\`AWS_CI_ROLE_ARN\` is not set on this repository, so there is"
+            echo "no AWS identity to push an image with, and the build was skipped."
+            echo
+            echo "This is expected immediately after scaffolding. The role is"
+            echo "created when the pull request against **platform-demo-role-vending**"
+            echo "adding \`roles/${{ github.event.repository.name }}.yaml\` is merged."
+            echo "That merge sets the variable and re-triggers this pipeline"
+            echo "automatically — there is nothing to do here by hand."
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # ---------------------------------------------------------------------
   # 7. The one required status check.
