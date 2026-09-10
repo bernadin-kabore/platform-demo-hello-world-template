@@ -7,6 +7,11 @@ builds its own container image and deploys independently of its siblings — see
 the repository root `README.md` for how the application fits together, and the
 GitOps repository for how this service is actually running.
 
+It requires **Node 22 or newer**, declared in `package.json` under `engines`,
+pinned in both Dockerfile stages, and matched by the CI `node-version`. Node 20
+reached end of life in April 2026, so its vulnerabilities are permanent and an
+image built on it cannot pass the platform's image scan.
+
 ## Working on it
 
 ```bash

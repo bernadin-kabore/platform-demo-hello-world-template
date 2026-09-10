@@ -78,7 +78,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     outputs:
-      digest: ${{ steps.push.outputs.digest }}
+      digest: ${{ steps.image.outputs.digest }}
     steps:
       - uses: actions/checkout@v4
 
@@ -147,34 +147,121 @@ jobs:
           sarif_file: trivy-image-${{ inputs.service }}.sarif
           category: trivy-image-${{ inputs.service }}
 
+      # Is this tag already in the registry?
+      #
+      # The tag is the commit SHA and ECR tags are immutable, so a run that
+      # pushed and then failed further down -- signing is two calls to shared
+      # public infrastructure, so it does fail -- leaves the tag claimed. A
+      # re-run of that build would be refused at the push with "already exists
+      # ... cannot be overwritten", which turns a transient network fault into
+      # a commit that can never go green.
+      #
+      # Finding the tag already present means this is a resumed run, not a
+      # conflict: within one repository nothing else publishes this tag. The
+      # digest already in the registry is the one to sign, because it is the
+      # one that will be deployed -- even if a rebuild would now produce
+      # different bytes.
+      - name: Check whether this tag is already published
+        id: published
+        run: |
+          set -euo pipefail
+          repository="${ECR_REPOSITORY#*/}"
+          digest=$(aws ecr describe-images \
+            --repository-name "$repository" \
+            --image-ids imageTag="$IMAGE_TAG" \
+            --query 'imageDetails[0].imageDigest' \
+            --output text 2>/dev/null || true)
+
+          if [ -n "$digest" ] && [ "$digest" != "None" ]; then
+            echo "Tag already published at ${digest}; resuming without pushing."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          ECR_REPOSITORY: ${{ inputs.ecr-repository }}
+          IMAGE_TAG: ${{ inputs.image-tag }}
+
       - name: Push image
         id: push
+        if: steps.published.outputs.exists != 'true'
         uses: docker/build-push-action@v6
         with:
           context: ${{ inputs.working-directory }}
           push: true
           tags: ${{ inputs.ecr-repository }}:${{ inputs.image-tag }}
 
+      # One digest for everything downstream, whether it was just pushed or
+      # was already there from an earlier attempt.
+      - name: Resolve the published digest
+        id: image
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.published.outputs.exists }}" = "true" ]; then
+            digest="${{ steps.published.outputs.digest }}"
+          else
+            digest="${{ steps.image.outputs.digest }}"
+          fi
+          if [ -z "$digest" ]; then
+            echo "::error::No image digest resolved; refusing to sign nothing."
+            exit 1
+          fi
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+
       - name: Generate SBOM (SPDX)
         uses: anchore/sbom-action@v0.17.2
         with:
-          image: "${{ inputs.ecr-repository }}@${{ steps.push.outputs.digest }}"
+          image: "${{ inputs.ecr-repository }}@${{ steps.image.outputs.digest }}"
           format: spdx-json
           output-file: sbom-${{ inputs.service }}.spdx.json
 
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
 
+      # Retried, because Fulcio is shared infrastructure and this pipeline
+      # signs services in parallel.
+      #
+      # cosign sign and cosign attest are two separate round-trips to
+      # fulcio.sigstore.dev per service. A multi-service build makes several of
+      # them at once, and the public good instance resets connections under
+      # load -- observed as
+      #
+      #   getting key from Fulcio: retrieving cert: ... read: connection reset
+      #
+      # after the image had already been pushed. Retrying here is what keeps
+      # that from stranding a commit; the check above is what lets a re-run get
+      # this far at all.
       - name: Sign image (keyless, via GitHub OIDC + Fulcio/Rekor)
         run: |
-          cosign sign --yes "${{ inputs.ecr-repository }}@${{ steps.push.outputs.digest }}"
+          set -euo pipefail
+          image="${{ inputs.ecr-repository }}@${{ steps.image.outputs.digest }}"
+          for attempt in 1 2 3; do
+            if cosign sign --yes "$image"; then
+              exit 0
+            fi
+            echo "::warning::cosign sign attempt ${attempt} failed; retrying"
+            sleep $((attempt * 10))
+          done
+          echo "::error::cosign sign failed after 3 attempts"
+          exit 1
 
       - name: Attest SBOM to the image
         run: |
-          cosign attest --yes \
-            --predicate sbom-${{ inputs.service }}.spdx.json \
-            --type spdxjson \
-            "${{ inputs.ecr-repository }}@${{ steps.push.outputs.digest }}"
+          set -euo pipefail
+          image="${{ inputs.ecr-repository }}@${{ steps.image.outputs.digest }}"
+          for attempt in 1 2 3; do
+            if cosign attest --yes \
+                 --predicate sbom-${{ inputs.service }}.spdx.json \
+                 --type spdxjson \
+                 "$image"; then
+              exit 0
+            fi
+            echo "::warning::cosign attest attempt ${attempt} failed; retrying"
+            sleep $((attempt * 10))
+          done
+          echo "::error::cosign attest failed after 3 attempts"
+          exit 1
 
       - uses: actions/upload-artifact@v4
         with:
@@ -193,7 +280,7 @@ jobs:
             "service": "${{ inputs.service }}",
             "repository": "${{ inputs.ecr-repository }}",
             "tag": "${{ inputs.image-tag }}",
-            "digest": "${{ steps.push.outputs.digest }}"
+            "digest": "${{ steps.image.outputs.digest }}"
           }
           JSON
 
