@@ -1,0 +1,33 @@
+# Node.js
+node_modules/
+coverage/
+*.tsbuildinfo
+npm-debug.log*
+
+# Go
+*.exe
+*.test
+vendor/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Java
+target/
+*.class
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Never commit credentials or local environment
+.env
+.env.*
+*.pem
