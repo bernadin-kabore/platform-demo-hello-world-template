@@ -92,9 +92,22 @@ jobs:
       - if: inputs.language == 'go'
         run: go test ./... -v
       - if: inputs.language == 'go'
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v9
         with:
           working-directory: ${{ inputs.working-directory }}
+          # Pinned, and pinned deliberately high. golangci-lint refuses to
+          # lint a module whose go directive is newer than the Go release the
+          # linter binary was built with:
+          #
+          #   can't load config: the Go language version (go1.24) used to
+          #   build golangci-lint is lower than the targeted Go version (1.26.0)
+          #
+          # The skeleton targets go 1.26 because golang.org/x/net requires it
+          # at the version that carries the vulnerability fixes, so the linter
+          # has to move with it. Left unpinned, the action installs its own
+          # default -- v1.64.8 at the time of writing -- and that fails on
+          # every scaffolded Go service.
+          version: v2.13.2
 
       # --- Java ----------------------------------------------------------
       - if: inputs.language == 'java'
