@@ -1,5 +1,10 @@
 # syntax=docker/dockerfile:1
-FROM golang:1.26.4-alpine3.23 AS builder
+# The builder's Go patch release matters as much as the base image: the
+# standard library is compiled into the binary, so Trivy reports stdlib CVEs
+# against whatever toolchain built it. 1.26.4 shipped with CVE-2026-56862 and
+# friends, fixed in 1.26.6 -- the image built cleanly, scanned dirty, and the
+# push was refused. Keep this at a patch the current advisories are fixed in.
+FROM golang:1.26.8-alpine3.24 AS builder
 WORKDIR /src
 COPY go.mod go.sum* ./
 RUN go mod download
