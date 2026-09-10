@@ -94,7 +94,26 @@ jobs:
       - if: inputs.language == 'go'
         id: coverage-go
         run: |
-          pct=$(go tool cover -func=coverage.out | grep ^total: | awk '{print substr($3, 1, length($3)-1)}')
+          # Telemetry bootstrap is excluded from the denominator, and the
+          # threshold is the same 70% every other language is held to.
+          #
+          # tracing.go and main.go are platform bootstrap -- OpenTelemetry
+          # wiring, logging setup, routing and the listener. Every service
+          # inherits them unchanged and nobody edits them. `go test -cover`
+          # counts every file in the package, so a service with both handlers
+          # fully tested still scored 11.2% and could not pass any threshold
+          # worth setting. The skeleton keeps handlers in handlers.go for
+          # exactly this reason: the split is what makes the number mean
+          # "is the code this team wrote tested".
+          #
+          # This is not a special case for Go so much as making Go match what
+          # the other languages already did by accident: c8 reports only files
+          # a test actually loads, so Node never counted its own telemetry
+          # bootstrap either. Before this, one number meant different things
+          # per language, which is worse than a lenient gate -- it looks
+          # comparable and is not.
+          grep -vE '/(tracing|main)\.go:' coverage.out > coverage.app.out || true
+          pct=$(go tool cover -func=coverage.app.out | grep ^total: | awk '{print substr($3, 1, length($3)-1)}')
           echo "pct=${pct}" >> "$GITHUB_OUTPUT"
 
       # --- Java ----------------------------------------------------------
