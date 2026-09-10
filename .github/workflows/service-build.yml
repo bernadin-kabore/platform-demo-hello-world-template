@@ -109,6 +109,23 @@ jobs:
           format: sarif
           output: trivy-image-${{ inputs.service }}.sarif
 
+      # Say what was actually found when the scan refuses an image.
+      #
+      # The scan above writes SARIF to a file, so a failure prints nothing to
+      # the log: the job stops with "exit code 1" and the findings are only
+      # visible in code scanning, which lags and deduplicates against alerts
+      # from earlier runs. That turns a one-line answer into an investigation.
+      # This re-runs the same scan as a table, only on failure, and never
+      # affects the outcome.
+      - name: Show what the scan refused
+        if: failure()
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ inputs.ecr-repository }}:${{ inputs.image-tag }}
+          severity: HIGH,CRITICAL
+          exit-code: "0"
+          format: table
+
       - name: Upload Trivy image results
         uses: github/codeql-action/upload-sarif@v3
         if: always()
