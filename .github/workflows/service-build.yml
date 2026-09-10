@@ -194,20 +194,30 @@ jobs:
 
       # One digest for everything downstream, whether it was just pushed or
       # was already there from an earlier attempt.
+      # One digest for everything downstream, read from the registry rather
+      # than from the push step's output.
+      #
+      # The registry is the only thing that knows what was actually published,
+      # and it answers identically whether this run pushed the image or found
+      # it already there. Reading build-push-action's output instead couples
+      # this to that action's behaviour and to whether the push step ran at
+      # all -- which, now that it is conditional, it may not.
       - name: Resolve the published digest
         id: image
         run: |
           set -euo pipefail
-          if [ "${{ steps.published.outputs.exists }}" = "true" ]; then
-            digest="${{ steps.published.outputs.digest }}"
-          else
-            digest="${{ steps.image.outputs.digest }}"
-          fi
-          if [ -z "$digest" ]; then
-            echo "::error::No image digest resolved; refusing to sign nothing."
+          repository="${ECR_REPOSITORY#*/}"
+          digest=$(aws ecr describe-images             --repository-name "$repository"             --image-ids imageTag="$IMAGE_TAG"             --query 'imageDetails[0].imageDigest'             --output text)
+
+          if [ -z "$digest" ] || [ "$digest" = "None" ]; then
+            echo "::error::No image digest in ECR for ${IMAGE_TAG}; refusing to sign nothing."
             exit 1
           fi
+          echo "Publishing ${digest}"
           echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+        env:
+          ECR_REPOSITORY: ${{ inputs.ecr-repository }}
+          IMAGE_TAG: ${{ inputs.image-tag }}
 
       - name: Generate SBOM (SPDX)
         uses: anchore/sbom-action@v0.17.2
