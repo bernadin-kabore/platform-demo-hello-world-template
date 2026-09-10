@@ -85,7 +85,7 @@ jobs:
       - if: inputs.language == 'go'
         uses: actions/setup-go@v5
         with:
-          go-version: "1.22"
+          go-version: "1.26"
           cache-dependency-path: ${{ inputs.working-directory }}/go.sum
       - if: inputs.language == 'go'
         run: go vet ./...
@@ -210,7 +210,7 @@ jobs:
       - if: inputs.language == 'go'
         uses: actions/setup-go@v5
         with:
-          go-version: "1.22"
+          go-version: "1.26"
           cache-dependency-path: ${{ inputs.working-directory }}/go.sum
       - if: inputs.language == 'go'
         name: govulncheck
