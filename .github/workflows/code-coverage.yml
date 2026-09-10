@@ -49,7 +49,16 @@ jobs:
       # --- Node.js -------------------------------------------------------
       - if: inputs.language == 'nodejs'
         uses: actions/setup-node@v4
-        with: { node-version: "${{ inputs.node-version }}", cache: "npm" }
+        with:
+          node-version: "${{ inputs.node-version }}"
+          cache: "npm"
+          # Part 2 made the unit of the platform an application: N services in
+          # subdirectories of one repository. setup-* actions resolve cache paths
+          # from the repository root, not from defaults.run.working-directory, so
+          # without this they look for a lockfile that is one directory down and
+          # report it missing from the root. For npm that is a hard error, not a
+          # warning: the step fails before a single test runs.
+          cache-dependency-path: ${{ inputs.working-directory }}/package-lock.json
       - if: inputs.language == 'nodejs'
         run: npm ci
       - if: inputs.language == 'nodejs'
@@ -77,7 +86,9 @@ jobs:
       # --- Go ----------------------------------------------------------
       - if: inputs.language == 'go'
         uses: actions/setup-go@v5
-        with: { go-version: "1.22" }
+        with:
+          go-version: "1.22"
+          cache-dependency-path: ${{ inputs.working-directory }}/go.sum
       - if: inputs.language == 'go'
         run: go test ./... -coverprofile=coverage.out
       - if: inputs.language == 'go'
