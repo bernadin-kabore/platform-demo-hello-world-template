@@ -25,7 +25,7 @@ on:
       node-version:
         description: Node major version for the nodejs path
         type: string
-        default: "20"
+        default: "22"
       nodejs-test-command:
         description: >-
           Command c8 wraps to produce coverage on the nodejs path. The default
