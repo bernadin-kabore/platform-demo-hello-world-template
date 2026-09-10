@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "description": "${{ values.description }}",
   "private": true,
+  "engines": {
+    "node": ">=22"
+  },
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
