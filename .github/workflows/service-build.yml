@@ -106,6 +106,20 @@ jobs:
           image-ref: ${{ inputs.ecr-repository }}:${{ inputs.image-tag }}
           severity: HIGH,CRITICAL
           exit-code: "1" # fails the build — nothing with a known HIGH/CRITICAL CVE ships
+          # Without this, the gate is not what it claims to be.
+          #
+          # trivy-action ignores the severity filter when format is sarif, so
+          # that the uploaded report carries every finding -- it announces
+          # "Building SARIF report with all severities". exit-code: 1 then
+          # fires on that unfiltered set, so a single LOW advisory fails the
+          # build even though the policy above says HIGH and CRITICAL.
+          #
+          # That went unnoticed because the Go service runs on
+          # distroless/static, which has no OS packages and therefore no
+          # findings at any severity. The first Node image, whose base
+          # legitimately carries a couple of unfixable LOWs, was refused with
+          # nothing in the log to say why.
+          limit-severities-for-sarif: true
           format: sarif
           output: trivy-image-${{ inputs.service }}.sarif
 
