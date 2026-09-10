@@ -19,15 +19,22 @@ func helloHandler(w http.ResponseWriter, r *http.Request) {
 	slog.InfoContext(r.Context(), "handled hello request", "route", "/")
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{
+	// The error is checked because the platform's golangci-lint runs errcheck,
+	// and because a write that fails here is worth a log line: the status has
+	// already been sent, so there is nothing left to tell the client.
+	if err := json.NewEncoder(w).Encode(map[string]string{
 		"message": "Hello from " + serviceName + "!",
 		"version": envOr("APP_VERSION", "dev"),
-	})
+	}); err != nil {
+		slog.ErrorContext(r.Context(), "failed to write response", "error", err)
+	}
 }
 
 func healthzHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("ok"))
+	if _, err := w.Write([]byte("ok")); err != nil {
+		slog.ErrorContext(r.Context(), "failed to write health response", "error", err)
+	}
 }
 
 func envOr(key, fallback string) string {

@@ -293,6 +293,58 @@ spec:
     # one Application per service per environment lives in the application's
     # own GitOps repository; this pull request adds the one pointer that makes
     # ArgoCD go and read it. Merging it is what turns the application on.
+    # -----------------------------------------------------------------
+    # The AWS identity
+    #
+    # The application's pipeline needs a role it can assume to push images.
+    # That role is vended by platform-demo-role-vending, from one file per
+    # application, and this pull request is that file.
+    #
+    # It is a pull request rather than a direct write for the same reason the
+    # ArgoCD registration below is: granting an application cloud access is a
+    # decision someone should record. The permissions boundary in the vending
+    # machine caps what any of these files can produce, so approving one is a
+    # judgement about whether the application should exist -- not an IAM
+    # review -- but it is still a judgement, and nothing here merges itself.
+    # -----------------------------------------------------------------
+    - id: fetch-role-request
+      name: Render the AWS role request
+      action: fetch:template
+      input:
+        url: ./role-request
+        targetPath: ./role-request
+        values:
+          appName: ${{ parameters.appName }}
+          services: ${{ parameters.services }}
+          githubOwner: ${{ (parameters.repoUrl | parseRepoUrl).owner }}
+
+    - id: request-aws-role
+      name: Open a PR requesting this application's AWS role
+      action: publish:github:pull-request
+      input:
+        repoUrl: github.com?owner=bernadin-kabore&repo=platform-demo-role-vending
+        branchName: vend-${{ parameters.appName }}
+        title: "Vend an AWS role for ${{ parameters.appName }}"
+        description: |
+          Opened automatically by the New Application scaffolder template.
+
+          Adds `roles/${{ parameters.appName }}.yaml`, requesting one CI role
+          for **${{ parameters.appName }}**, federated to
+          `${{ parameters.appName }}-source` on `main`, able to push to the
+          image repositories of its
+          ${{ parameters.services | length }} service(s) and nothing else.
+
+          The plan for this change is posted as a comment below, including a
+          rendered summary of exactly what the role will be allowed to do.
+          Every role vended from this repository is capped by the platform
+          permissions boundary, which this pull request cannot alter.
+
+          Merging this creates the role, the image repositories, and sets
+          `AWS_CI_ROLE_ARN` on the source repository, then re-triggers its
+          pipeline. Until then that pipeline skips the build stage and
+          explains why in its run summary.
+        sourcePath: ./role-request
+
     - id: fetch-registration
       name: Render the platform registration
       action: fetch:template
@@ -333,6 +385,8 @@ spec:
       - title: Open in catalog
         icon: catalog
         entityRef: ${{ steps['register-source'].output.entityRef }}
+      - title: Pull request granting AWS access
+        url: ${{ steps['request-aws-role'].output.remoteUrl }}
       - title: Pull request that turns it on
         url: ${{ steps['register-with-argocd'].output.remoteUrl }}
     text:
@@ -341,11 +395,21 @@ spec:
           **${{ parameters.appName }}** now exists as two repositories and
           ${{ parameters.services | length }} service(s) in the catalog.
 
-          Before anything deploys, two things need a human:
+          Two pull requests were opened for you. Both need a human to merge
+          them, and neither needs you to write anything:
 
-          1. Merge the pull request above against `platform-demo-gitops` — that
-             is what tells ArgoCD the application exists.
-          2. Set `AWS_CI_ROLE_ARN` and the deploy-bot secrets on the source
-             repository, and add this application to the `applications` map in
-             `platform-demo-terraform-modules/envs/dev`. Until Terraform has
-             run, there is no ECR repository to push to and no role to assume.
+          1. **platform-demo-role-vending** — grants this application an AWS
+             identity and creates its image repositories. Merging it also sets
+             `AWS_CI_ROLE_ARN` here and re-runs this pipeline, so the first
+             build starts on its own.
+          2. **platform-demo-gitops** — tells ArgoCD the application exists.
+             Merging it is what starts deployment.
+
+          Until the first merges, the pipeline runs its tests and scans but
+          skips the build, and says so in the run summary. That is expected,
+          not a failure.
+
+          The deploy-bot secret used to open image-bump pull requests against
+          the GitOps repository is still set by hand — the platform has no
+          secrets-delivery mechanism yet, and unlike a role ARN that one is a
+          real credential.
