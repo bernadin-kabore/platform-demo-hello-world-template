@@ -163,7 +163,6 @@ spec:
       name: Publish the source repository
       action: publish:github
       input:
-        allowedHosts: [github.com]
         description: ${{ parameters.description }}
         repoUrl: ${{ parameters.repoUrl }}
         defaultBranch: main
@@ -252,7 +251,6 @@ spec:
       name: Publish the GitOps repository
       action: publish:github
       input:
-        allowedHosts: [github.com]
         description: Deployment state for ${{ parameters.appName }}
         repoUrl: github.com?owner=${{ (parameters.repoUrl | parseRepoUrl).owner }}&repo=${{ parameters.appName }}-gitops
         defaultBranch: main
