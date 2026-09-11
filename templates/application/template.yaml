@@ -174,6 +174,11 @@ spec:
         description: ${{ parameters.description }}
         repoUrl: ${{ parameters.repoUrl }}
         defaultBranch: main
+        # Public because a repository ruleset cannot be created on a private
+        # repository owned by a personal account without a paid plan, and the
+        # ruleset is what stops CI merging its own pull requests. The
+        # enforcement is not optional, so the visibility cannot be.
+        repoVisibility: public
         # Protection comes from the branch-protection step below instead of
         # publish:github's classic-rule support — one ruleset covers
         # main/develop/release/* together rather than layering two protection
@@ -262,6 +267,11 @@ spec:
         description: Deployment state for ${{ parameters.appName }}
         repoUrl: github.com?owner=${{ (parameters.repoUrl | parseRepoUrl).owner }}&repo=${{ parameters.appName }}-gitops
         defaultBranch: main
+        # Public because a repository ruleset cannot be created on a private
+        # repository owned by a personal account without a paid plan, and the
+        # ruleset is what stops CI merging its own pull requests. The
+        # enforcement is not optional, so the visibility cannot be.
+        repoVisibility: public
         protectDefaultBranch: false
         sourcePath: ./gitops
 
