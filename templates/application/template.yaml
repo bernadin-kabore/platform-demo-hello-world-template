@@ -394,36 +394,47 @@ spec:
 
   output:
     links:
+      # The two pull requests come first because they are the only things here
+      # that need a person. The other three point at things that already exist
+      # and can be found again from the catalog at any time; these two are what
+      # the application is waiting on. A call to action listed fourth, and named
+      # after what it is rather than what it asks for, is one people scroll past.
+      - title: "Review and merge (1 of 2): AWS access"
+        url: ${{ steps['request-aws-role'].output.remoteUrl }}
+        icon: github
+      - title: "Review and merge (2 of 2): start deployment"
+        url: ${{ steps['register-with-argocd'].output.remoteUrl }}
+        icon: github
       - title: Source repository
         url: ${{ steps['publish-source'].output.remoteUrl }}
+        icon: github
       - title: GitOps repository
         url: ${{ steps['publish-gitops'].output.remoteUrl }}
+        icon: github
       - title: Open in catalog
         icon: catalog
         entityRef: ${{ steps['register-source'].output.entityRef }}
-      - title: Pull request granting AWS access
-        url: ${{ steps['request-aws-role'].output.remoteUrl }}
-      - title: Pull request that turns it on
-        url: ${{ steps['register-with-argocd'].output.remoteUrl }}
     text:
+      - title: Two pull requests are waiting for you
+        content: |
+          Nothing is deployed yet, and nothing will be until both of these are
+          merged. Neither asks you to write anything — both are already filled
+          in, and each explains itself in its own description.
+
+          1. **platform-demo-role-vending** — grants this application an AWS
+             identity and creates its image repositories. Merging it also sets
+             `AWS_CI_ROLE_ARN` on the source repository and re-runs the
+             pipeline, so the first build starts on its own.
+          2. **platform-demo-gitops** — tells ArgoCD the application exists.
+             Merging it is what starts deployment.
+
+          Until the first one merges, the pipeline runs its tests and scans but
+          skips the build, and says so in the run summary. That is expected,
+          not a failure.
       - title: What was created
         content: |
           **${{ parameters.appName }}** now exists as two repositories and
           ${{ parameters.services | length }} service(s) in the catalog.
-
-          Two pull requests were opened for you. Both need a human to merge
-          them, and neither needs you to write anything:
-
-          1. **platform-demo-role-vending** — grants this application an AWS
-             identity and creates its image repositories. Merging it also sets
-             `AWS_CI_ROLE_ARN` here and re-runs this pipeline, so the first
-             build starts on its own.
-          2. **platform-demo-gitops** — tells ArgoCD the application exists.
-             Merging it is what starts deployment.
-
-          Until the first merges, the pipeline runs its tests and scans but
-          skips the build, and says so in the run summary. That is expected,
-          not a failure.
 
           The deploy-bot secret used to open image-bump pull requests against
           the GitOps repository is still set by hand — the platform has no
