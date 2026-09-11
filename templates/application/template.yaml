@@ -117,6 +117,14 @@ spec:
           ui:field: RepoUrlPicker
           ui:options:
             allowedHosts: [github.com]
+            # Fixed rather than free text. publish:github cannot create a
+            # repository under an account this token does not control, but it
+            # does not fail there — it falls back to creating one under the
+            # authenticated user, and the run only breaks later when a step
+            # addresses the owner that was actually asked for. A typo therefore
+            # produced a repository in the wrong place and an error six steps
+            # away from its cause.
+            allowedOwners: [bernadin-kabore]
 
   steps:
     # -----------------------------------------------------------------
