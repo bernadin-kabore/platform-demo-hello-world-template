@@ -157,12 +157,22 @@ jobs:
         uses: actions/setup-python@v5
         with: { python-version: "3.12" }
       - if: inputs.language == 'python'
-        run: pip install bandit
+        # bandit ships no sarif formatter of its own: without this package
+        # `-f sarif` is rejected while parsing arguments, so the scan never
+        # runs and no report is written.
+        run: pip install bandit bandit-sarif-formatter
       - if: inputs.language == 'python'
         name: Bandit
         run: bandit -r app -f sarif -o bandit-results.sarif || true
         working-directory: ${{ inputs.working-directory }}
-      - if: inputs.language == 'python'
+      - if: >-
+          inputs.language == 'python' &&
+          hashFiles(format('{0}/bandit-results.sarif', inputs.working-directory)) != ''
+        # Guarded on the report existing. `|| true` above says this gate does
+        # not block, but an upload that fails on a missing file takes the job
+        # down anyway and silently converts a non-blocking gate into a blocking
+        # one -- which is how the scanner being broken looked identical to the
+        # code being unsafe.
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: ${{ inputs.working-directory }}/bandit-results.sarif
